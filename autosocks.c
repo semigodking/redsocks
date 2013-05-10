@@ -60,7 +60,7 @@ static void auto_connect_relay(redsocks_client *client);
 static void direct_relay_clientreadcb(struct bufferevent *from, void *_client);
 
 #define CIRCUIT_RESET_SECONDS 1
-#define CONNECT_TIMEOUT_SECONDS 13 
+#define CONNECT_TIMEOUT_SECONDS 5 
 #define ADDR_CACHE_BLOCKS 64
 #define ADDR_CACHE_BLOCK_SIZE 16 
 #define block_from_sockaddr_in(addr) (addr->sin_addr.s_addr & 0xFF) / (256/ADDR_CACHE_BLOCKS)
