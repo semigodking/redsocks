@@ -132,8 +132,9 @@ void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 							}
 
 							/* close relay tunnel */
-							redsocks_close(EVENT_FD(&client->relay->ev_write));
+							int fd = bufferevent_getfd(client->relay);
 							bufferevent_free(client->relay);
+							redsocks_close(fd);
 
 							/* set to initial state*/
 							client->state = httpc_new;
@@ -210,8 +211,7 @@ static struct evbuffer *httpc_mkconnect(redsocks_client *client)
 
 			/* prepare an random string for cnounce */
 			char cnounce[17];
-			snprintf(cnounce, sizeof(cnounce), "%04x%04x%04x%04x",
-			         rand() & 0xffff, rand() & 0xffff, rand() & 0xffff, rand() & 0xffff);
+			snprintf(cnounce, sizeof(cnounce), "%08x%08x", red_randui32(), red_randui32());
 
 			auth_string = digest_authentication_encode(auth->last_auth_query + 7, //line
 					client->instance->config.login, client->instance->config.password, //user, pass

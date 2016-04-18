@@ -39,13 +39,7 @@
 #include "main.h"
 #include "redsocks.h"
 #include "redudp.h"
-
-/* Just in case the IP_TRANSPARENT define isn't included somehow */
-#if !defined(IP_TRANSPARENT)
-#define IP_TRANSPARENT 19
-#define IP_ORIGDSTADDR       20
-#define IP_RECVORIGDSTADDR   IP_ORIGDSTADDR
-#endif
+#include "libc-compat.h"
 
 #define DEFAULT_MAX_PKTQUEUE  5
 #define DEFAULT_UDP_TIMEOUT   30
@@ -119,7 +113,7 @@ static int bound_udp4_get(const struct sockaddr_in *addr)
 
     node->key = key;
     node->ref = 1;
-    node->fd = socket(AF_INET, SOCK_DGRAM, 0);
+    node->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     node->t_last_rx = redsocks_time(NULL);
     if (node->fd == -1) {
         log_errno(LOG_ERR, "socket");
@@ -136,6 +130,11 @@ static int bound_udp4_get(const struct sockaddr_in *addr)
 
     if (0 != bind(node->fd, (struct sockaddr*)addr, sizeof(*addr))) {
         log_errno(LOG_ERR, "bind");
+        goto fail;
+    }
+
+    if (0 != evutil_make_socket_nonblocking(node->fd)) {
+        log_errno(LOG_ERR, "evutil_make_socket_nonblocking");
         goto fail;
     }
 
@@ -555,7 +554,7 @@ static int redudp_init_instance(redudp_instance *instance)
         goto fail;
     } 
 
-    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd == -1) {
         log_errno(LOG_ERR, "socket");
         goto fail;

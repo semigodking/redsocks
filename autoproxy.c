@@ -41,11 +41,10 @@ typedef enum autoproxy_state_t {
 
 typedef struct autoproxy_client_t {
     autoproxy_state state;
-    time_t time_connect_relay; // timestamp when start to connect relay
     size_t data_recv;
     size_t data_sent;
     struct event * recv_timer_event;
-    int    quick_check; // flag indicating quick check initiated.
+    short  quick_check; // flag indicating quick check initiated.
 } autoproxy_client;
 
 
@@ -61,8 +60,8 @@ static void auto_event_error(struct bufferevent *buffev, short what, void *_arg)
 
 typedef struct autoproxy_config_t {
     list_head  list; // Make it a list to support multiple configurations
-    int    quick_connect_timeout;
-    int    no_quick_check_seconds;
+    uint16_t   quick_connect_timeout;
+    uint16_t   no_quick_check_seconds;
 } autoproxy_config;
 
 static autoproxy_config default_config = {
@@ -118,7 +117,7 @@ static int autoproxy_onexit(parser_section *section)
         err = "Timeout value for quick check can not be 0. Default: 3";
 
     if (err)
-        parser_error(section->context, err);
+        parser_error(section->context, "%s", err);
     else
         // Add config to config list
         list_add(&config->list, &configs);
@@ -323,7 +322,7 @@ static int handle_write_to_relay(redsocks_client *client)
                 {
                     struct timeval tv;
                     tv.tv_sec = 0;
-                    tv.tv_usec = 600000;
+                    tv.tv_usec = 400000;
                     if (-1 == evtimer_add(aclient->recv_timer_event, &tv))
                     {
                         redsocks_log_error(client, LOG_DEBUG, "Failed to add timer!");
@@ -476,6 +475,7 @@ static void auto_drop_relay(redsocks_client *client)
         redsocks_close(fd);
         client->relay = NULL;
     }
+    client->relay_evshut = 0;
     client->relay_connected = 0;
 }
 
@@ -729,8 +729,6 @@ static int auto_connect_relay(redsocks_client *client)
                         NULL, auto_relay_connected, auto_event_error, client, 
                         &tv);
     
-        aclient->time_connect_relay = redsocks_time(NULL);
-           
         if (!client->relay) {
             redsocks_log_errno(client, LOG_ERR, "auto_connect_relay");
             redsocks_drop_client(client);

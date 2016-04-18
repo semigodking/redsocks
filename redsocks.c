@@ -27,7 +27,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <signal.h>
 #include <time.h>
 #include <errno.h>
 #include <assert.h>
@@ -39,9 +38,10 @@
 #include "base.h"
 #include "redsocks.h"
 #include "utils.h"
+#include "libevent-compat.h"
 
 
-#define REDSOCKS_RELAY_HALFBUFF 1024*32
+#define REDSOCKS_RELAY_HALFBUFF 1024*16
 #define REDSOCKS_AUDIT_INTERVAL 60*2
 static void redsocks_relay_relayreadcb(struct bufferevent *from, void *_client);
 static void redsocks_relay_relaywritecb(struct bufferevent *from, void *_client);
@@ -205,7 +205,7 @@ static int redsocks_onexit(parser_section *section)
     }
 
     if (err)
-        parser_error(section->context, err);
+        parser_error(section->context, "%s", err);
 
     return err ? -1 : 0;
 }
@@ -224,28 +224,21 @@ void redsocks_log_write_plain(
         int priority, const char *orig_fmt, ...
 ) {
     int saved_errno = errno;
-    struct evbuffer *fmt = evbuffer_new();
     va_list ap;
     char clientaddr_str[RED_INET_ADDRSTRLEN], destaddr_str[RED_INET_ADDRSTRLEN];
+    char fmt[MAX_LOG_LENGTH+1];
 
-    if (!fmt) {
-        log_errno(LOG_ERR, "evbuffer_new()");
-        // no return, as I have to call va_start/va_end
-    }
+    if (!log_level_enabled(priority))
+        return;
 
-    if (fmt) {
-        evbuffer_add_printf(fmt, "[%s->%s]: %s",
+    snprintf(fmt, sizeof(fmt),  "[%s->%s]: %s",
                 red_inet_ntop(clientaddr, clientaddr_str, sizeof(clientaddr_str)),
                 red_inet_ntop(destaddr, destaddr_str, sizeof(destaddr_str)),
                 orig_fmt);
-    }
 
     va_start(ap, orig_fmt);
-    if (fmt) {
-        errno = saved_errno;
-        _log_vwrite(file, line, func, do_errno, priority, (const char*)EVBUFFER_DATA(fmt), ap);
-        evbuffer_free(fmt);
-    }
+    errno = saved_errno;
+    _log_vwrite(file, line, func, do_errno, priority, &fmt[0], ap);
     va_end(ap);
 }
 
@@ -254,6 +247,11 @@ void redsocks_touch_client(redsocks_client *client)
     redsocks_time(&client->last_event);
 }
 
+static inline const char* bufname(redsocks_client *client, struct bufferevent *buf)
+{
+	assert(buf == client->client || buf == client->relay);
+	return buf == client->client ? "client" : "relay";
+}
 
 static void redsocks_relay_readcb(redsocks_client *client, struct bufferevent *from, struct bufferevent *to)
 {
@@ -286,9 +284,8 @@ int process_shutdown_on_write_(redsocks_client *client, struct bufferevent *from
                                 evbuffer_get_length(bufferevent_get_output(from)),
                                 evbuffer_get_length(bufferevent_get_input(to)));
 
-    if (evbuffer_get_length(bufferevent_get_input(from)) == 0
-            && (from_evshut & EV_READ)
-            && !(to_evshut & EV_WRITE)) {
+    if ((from_evshut & EV_READ) && !(to_evshut & EV_WRITE)
+        &&  evbuffer_get_length(bufferevent_get_input(from)) == 0) {
         redsocks_shutdown(client, to, SHUT_WR);
         return 1;
     }
@@ -297,8 +294,8 @@ int process_shutdown_on_write_(redsocks_client *client, struct bufferevent *from
 
 static void redsocks_relay_writecb(redsocks_client *client, struct bufferevent *from, struct bufferevent *to)
 {
-    unsigned short from_evshut = from == client->client ? client->client_evshut : client->relay_evshut;
     assert(from == client->client || from == client->relay);
+    unsigned short from_evshut = from == client->client ? client->client_evshut : client->relay_evshut;
 
     if (process_shutdown_on_write_(client, from, to))
         return;
@@ -839,16 +836,16 @@ void redsocks_dump_client(redsocks_client * client, int loglevel)
     const char *s_relay_evshut = redsocks_evshut_str(client->relay_evshut);
 
     redsocks_log_error(client, loglevel, "client(%i): (%s)%s%s input %u output %u, relay(%i): (%s)%s%s input %u output %u, age: %li sec, idle: %li sec.",
-        bufferevent_getfd(client->client),
-            redsocks_event_str(bufferevent_get_enabled(client->client)),
+        client->client ? bufferevent_getfd(client->client) : -1,
+            redsocks_event_str(client->client ?  bufferevent_get_enabled(client->client) : 0),
             s_client_evshut[0] ? " " : "", s_client_evshut,
-            evbuffer_get_length(bufferevent_get_input(client->client)),
-            evbuffer_get_length(bufferevent_get_output(client->client)),
-        bufferevent_getfd(client->relay),
-            redsocks_event_str(bufferevent_get_enabled(client->relay)),
+            client->client ? evbuffer_get_length(bufferevent_get_input(client->client)) : 0,
+            client->client ? evbuffer_get_length(bufferevent_get_output(client->client)) : 0,
+        client->relay ? bufferevent_getfd(client->relay) : -1,
+            redsocks_event_str(client->relay ? bufferevent_get_enabled(client->relay) : 0),
             s_relay_evshut[0] ? " " : "", s_relay_evshut,
-            evbuffer_get_length(bufferevent_get_input(client->relay)),
-            evbuffer_get_length(bufferevent_get_output(client->relay)),
+            client->relay ? evbuffer_get_length(bufferevent_get_input(client->relay)) : 0,
+            client->relay ? evbuffer_get_length(bufferevent_get_output(client->relay)) : 0,
             now - client->first_event,
             now - client->last_event);
 }
@@ -894,7 +891,8 @@ static void redsocks_audit_instance(redsocks_instance *instance)
             /* drop this client if either end disconnected */   
             if ((client->client_evshut == EV_WRITE && client->relay_evshut == EV_READ)
                 || (client->client_evshut == EV_READ && client->relay_evshut == EV_WRITE)
-                || (client->client_evshut == (EV_READ|EV_WRITE) && client->relay_evshut == EV_WRITE))
+                || (client->client_evshut == (EV_READ|EV_WRITE) && client->relay_evshut == EV_WRITE)
+                || (client->client_evshut == EV_READ && client->relay == NULL))
                 drop_it = 1;
         }
         /* close long connections without activities */
@@ -907,22 +905,6 @@ static void redsocks_audit_instance(redsocks_instance *instance)
         }
     }
     log_error(LOG_DEBUG, "End of auditing client list.");
-}
-
-
-static void redsocks_heartbeat(int sig, short what, void *_arg)
-{
-    time_t now = redsocks_time(NULL);
-    FILE * tmp = NULL;
-    char tmp_fname[128];
-
-    snprintf(tmp_fname, sizeof(tmp_fname), "/tmp/redtime-%d", getppid());
-    tmp = fopen(tmp_fname, "w");
-    if (tmp)
-    {
-        fprintf(tmp, "%ld ", (long int)now);
-        fclose(tmp);
-    }
 }
 
 static void redsocks_audit(int sig, short what, void *_arg)
@@ -950,7 +932,7 @@ static int redsocks_init_instance(redsocks_instance *instance)
         goto fail;
     } 
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == -1) {
         log_errno(LOG_ERR, "socket");
         goto fail;
@@ -1046,40 +1028,14 @@ static void redsocks_fini_instance(redsocks_instance *instance) {
 
 static int redsocks_fini();
 
-static struct event heartbeat_writer;
 static struct event audit_event;
 
-//static void ignore_sig(int t) {}
-
 static int redsocks_init() {
-    struct sigaction sa/* , sa_old*/;
     redsocks_instance *tmp, *instance = NULL;
-//    void (* old_hdl)(int)= NULL;
     struct timeval audit_time;
     struct event_base * base = get_event_base();
 
     memset(&audit_event, 0, sizeof(audit_event));
-/*
-    old_hdl = signal(SIGPIPE, ignore_sig); 
-    if (old_hdl == -1) {
-        log_errno(LOG_ERR, "sigaction");
-        return -1;
-    }
-*/
-    memset(&sa, 0, sizeof(struct sigaction));
-    sa.sa_handler = SIG_IGN;
-    //sa.sa_flags = SA_RESTART;
-
-    if (sigaction(SIGPIPE, &sa, NULL)  == -1) {
-        log_errno(LOG_ERR, "sigaction");
-        return -1;
-    }
-
-    evsignal_assign(&heartbeat_writer, base, SIGUSR2, redsocks_heartbeat, NULL);
-    if (evsignal_add(&heartbeat_writer, NULL) != 0) {
-        log_errno(LOG_ERR, "evsignal_add SIGUSR2");
-        goto fail;
-    }
     /* Start audit */
     audit_time.tv_sec = REDSOCKS_AUDIT_INTERVAL;
     audit_time.tv_usec = 0;
@@ -1095,9 +1051,6 @@ static int redsocks_init() {
 
 fail:
     // that was the first resource allocation, it return's on failure, not goto-fail's
-/*  sigaction(SIGPIPE, &sa_old, NULL); */
-//    signal(SIGPIPE, old_hdl);
-
     redsocks_fini();
 
     return -1;

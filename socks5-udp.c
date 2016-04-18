@@ -93,7 +93,7 @@ static void socks5_client_fini(redudp_client *client)
 		close(fd);
 	}
     if (socks5client->relay) {
-        fd = EVENT_FD(&socks5client->relay->ev_read);
+        fd = bufferevent_getfd(socks5client->relay);
         bufferevent_free(socks5client->relay);
         shutdown(fd, SHUT_RDWR);
         close(fd);
@@ -223,11 +223,18 @@ static void socks5_read_assoc_reply(struct bufferevent *buffev, void *_arg)
 	socks5client->udprelayaddr.sin_port = reply.ip.port;
 	socks5client->udprelayaddr.sin_addr.s_addr = reply.ip.addr;
 
-	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd == -1) {
 		redudp_log_errno(client, LOG_ERR, "socket");
 		goto fail;
 	}
+
+    error = evutil_make_socket_nonblocking(fd);
+    if (error) {
+        redudp_log_errno(client, LOG_ERR, "evutil_make_socket_nonblocking");
+        goto fail;
+    }
+
 
 	error = connect(fd, (struct sockaddr*)&socks5client->udprelayaddr, sizeof(socks5client->udprelayaddr));
 	if (error) {
