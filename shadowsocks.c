@@ -25,8 +25,6 @@
 #include "encrypt.h"
 #include "shadowsocks.h"
 
-#define INITIAL_BUFFER_SIZE 8192
-
 typedef enum ss_state_t {
     ss_new,
     ss_connected,
@@ -292,24 +290,18 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
     The two peers will handle it. */
     bufferevent_set_timeouts(client->relay, NULL, NULL);
 
-    if (!redsocks_start_relay(client))
-    {
-        /* overwrite theread callback to my function */
-        bufferevent_setcb(client->client, ss_client_readcb,
-                                         ss_client_writecb,
-                                         redsocks_event_error,
-                                         client);
-        bufferevent_setcb(client->relay, ss_relay_readcb,
-                                         ss_relay_writecb,
-                                         redsocks_event_error,
-                                         client);
-    }
-    else
-    {
-        redsocks_log_error(client, LOG_DEBUG, "failed to start relay");
-        redsocks_drop_client(client);
+    if (redsocks_start_relay(client))
+        // redsocks_start_relay() drops client on failure
         return;
-    }
+    /* overwrite theread callback to my function */
+    bufferevent_setcb(client->client, ss_client_readcb,
+                                     ss_client_writecb,
+                                     redsocks_event_error,
+                                     client);
+    bufferevent_setcb(client->relay, ss_relay_readcb,
+                                     ss_relay_writecb,
+                                     redsocks_event_error,
+                                     client);
 
     /* build and send header */
     // TODO: Better implementation and IPv6 Support
@@ -335,10 +327,6 @@ static int ss_connect_relay(redsocks_client *client)
 
     tv.tv_sec = client->instance->config.timeout;
     tv.tv_usec = 0;
-    /* use default timeout if timeout is not configured */
-    if (tv.tv_sec == 0)
-        tv.tv_sec = DEFAULT_CONNECT_TIMEOUT; 
-    
     client->relay = red_connect_relay2(&client->instance->config.relayaddr,
                     NULL, ss_relay_connected, redsocks_event_error, client, 
                     &tv);
@@ -355,6 +343,7 @@ static int ss_instance_init(struct redsocks_instance_t *instance)
 {
     ss_instance * ss = (ss_instance *)(instance+1);
     const redsocks_config *config = &instance->config;
+    char buf1[RED_INET_ADDRSTRLEN];
 
     int valid_cred =  ss_is_valid_cred(config->login, config->password);
     if (!valid_cred 
@@ -365,7 +354,10 @@ static int ss_instance_init(struct redsocks_instance_t *instance)
     }
     else
     {
-        log_error(LOG_INFO, "using encryption method: %s", config->login);
+        log_error(LOG_INFO, "%s @ %s: encryption method: %s",
+            instance->relay_ss->name,
+            red_inet_ntop(&instance->config.bindaddr, buf1, sizeof(buf1)),
+            config->login);
     }
     return 0;
 }

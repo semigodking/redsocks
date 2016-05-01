@@ -46,7 +46,7 @@
 #define REDUDP_AUDIT_INTERVAL 10
 
 // Multiple instances share the same buffer for message receiving
-static char recv_buff[64*1024];// max size of UDP packet is less than 64K
+static char shared_buff[MAX_UDP_PACKET_SIZE];// max size of UDP packet is less than 64K
 
 static void redudp_fini_instance(redudp_instance *instance);
 static int redudp_fini();
@@ -241,7 +241,7 @@ struct sockaddr_in* get_destaddr(redudp_client *client)
  */
 void redudp_drop_client(redudp_client *client)
 {
-    redudp_log_error(client, LOG_DEBUG, "Dropping UDP client");
+    redudp_log_error(client, LOG_DEBUG, "Dropping client @ state: %d", client->state);
     enqueued_packet *q, *tmp;
 
     if (client->instance->relay_ss->fini)
@@ -282,7 +282,7 @@ void redudp_fwd_pkt_to_sender(redudp_client *client, void *buf, size_t len,
     // When working with TPROXY, we have to get sender FD from tree on
     // receipt of each packet from relay.
     fd = do_tproxy(client->instance) ? bound_udp4_get(srcaddr)
-                                     : EVENT_FD(&client->instance->listener);
+                                     : event_get_fd(&client->instance->listener);
     if (fd == -1) {
         redudp_log_error(client, LOG_WARNING, "bound_udp4_get failure");
         return;
@@ -392,9 +392,9 @@ static void redudp_pkt_from_client(int fd, short what, void *_arg)
 
     pdestaddr = do_tproxy(self) ? &destaddr : NULL;
 
-    assert(fd == EVENT_FD(&self->listener));
+    assert(fd == event_get_fd(&self->listener));
     // destaddr will be filled with true destination if it is available
-    pktlen = red_recv_udp_pkt(fd, recv_buff, sizeof(recv_buff), &clientaddr, pdestaddr);
+    pktlen = red_recv_udp_pkt(fd, self->shared_buff, MAX_UDP_PACKET_SIZE, &clientaddr, pdestaddr);
     if (pktlen == -1)
         return;
     if (!pdestaddr)
@@ -414,14 +414,14 @@ static void redudp_pkt_from_client(int fd, short what, void *_arg)
         redudp_bump_timeout(client);
 
         if (self->relay_ss->ready_to_fwd(client)) {
-            self->relay_ss->forward_pkt(client, (struct sockaddr *)pdestaddr, recv_buff, pktlen);
+            self->relay_ss->forward_pkt(client, (struct sockaddr *)pdestaddr, self->shared_buff, pktlen);
         }
         else {
-            redudp_enqeue_pkt(client, pdestaddr, recv_buff, pktlen);
+            redudp_enqeue_pkt(client, pdestaddr, self->shared_buff, pktlen);
         }
     }
     else {
-        redudp_first_pkt_from_client(self, &clientaddr, pdestaddr, recv_buff, pktlen);
+        redudp_first_pkt_from_client(self, &clientaddr, pdestaddr, self->shared_buff, pktlen);
     }
 }
 
@@ -548,6 +548,7 @@ static int redudp_init_instance(redudp_instance *instance)
     int fd = -1;
     char buf1[RED_INET_ADDRSTRLEN], buf2[RED_INET_ADDRSTRLEN];
 
+    instance->shared_buff = &shared_buff[0];
     if (instance->relay_ss->instance_init 
         && instance->relay_ss->instance_init(instance)) {
         log_errno(LOG_ERR, "Failed to init UDP relay subsystem.");
@@ -628,7 +629,7 @@ static void redudp_fini_instance(redudp_instance *instance)
     if (event_initialized(&instance->listener)) {
         if (event_del(&instance->listener) != 0)
             log_errno(LOG_WARNING, "event_del");
-        close(EVENT_FD(&instance->listener));
+        close(event_get_fd(&instance->listener));
         memset(&instance->listener, 0, sizeof(instance->listener));
     }
 

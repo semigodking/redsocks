@@ -207,6 +207,8 @@ static int redsocks_onexit(parser_section *section)
     if (err)
         parser_error(section->context, "%s", err);
 
+    if (instance->config.timeout == 0)
+        instance->config.timeout = DEFAULT_CONNECT_TIMEOUT;
     return err ? -1 : 0;
 }
 
@@ -382,7 +384,7 @@ int redsocks_start_relay(redsocks_client *client)
 void redsocks_drop_client(redsocks_client *client)
 {
     int fd;
-    redsocks_log_error(client, LOG_DEBUG, "dropping client");
+    redsocks_log_error(client, LOG_DEBUG, "dropping client @ state: %d", client->state);
 
     if (client->instance->config.autoproxy && autoproxy_subsys.fini)
         autoproxy_subsys.fini(client);
@@ -638,9 +640,6 @@ int redsocks_connect_relay(redsocks_client *client)
     struct timeval tv;
     tv.tv_sec = client->instance->config.timeout;
     tv.tv_usec = 0;
-    if (tv.tv_sec == 0)
-        tv.tv_sec = DEFAULT_CONNECT_TIMEOUT;
-
 
     client->relay = red_connect_relay2(&client->instance->config.relayaddr,
                                       NULL, 
@@ -713,7 +712,7 @@ static void redsocks_accept_client(int fd, short what, void *_arg)
         if (errno == ENFILE || errno == EMFILE || errno == ENOBUFS || errno == ENOMEM) {
             self->accept_backoff_ms = (self->accept_backoff_ms << 1) + 1;
             clamp_value(self->accept_backoff_ms, self->config.min_backoff_ms, self->config.max_backoff_ms);
-            int delay = (random() % self->accept_backoff_ms) + 1;
+            int delay = (red_randui32() % self->accept_backoff_ms) + 1;
             log_errno(LOG_WARNING, "accept: out of file descriptors, backing off for %u ms", delay);
             struct timeval tvdelay = { delay / 1000, (delay % 1000) * 1000 };
             if (tracked_event_del(&self->listener) != 0)
@@ -738,6 +737,12 @@ static void redsocks_accept_client(int fd, short what, void *_arg)
 
     error = getdestaddr(client_fd, &clientaddr, &myaddr, &destaddr);
     if (error) {
+        goto fail;
+    }
+
+    error = evutil_make_socket_nonblocking(client_fd);
+    if (error) {
+        log_errno(LOG_ERR, "evutil_make_socket_nonblocking");
         goto fail;
     }
 
@@ -853,9 +858,11 @@ void redsocks_dump_client(redsocks_client * client, int loglevel)
 static void redsocks_dump_instance(redsocks_instance *instance)
 {
     redsocks_client *client = NULL;
+    char addr_str[RED_INET_ADDRSTRLEN];
 
-    log_error(LOG_INFO, "Dumping client list for instance %p(%s):", instance,
-                        instance->relay_ss->name);
+    log_error(LOG_INFO, "Dumping client list for instance (%s @ %s):",
+              instance->relay_ss->name,
+              red_inet_ntop(&instance->config.bindaddr, addr_str, sizeof(addr_str)));
     list_for_each_entry(client, &instance->clients, list)
         redsocks_dump_client(client, LOG_INFO);
     
@@ -880,9 +887,11 @@ static void redsocks_audit_instance(redsocks_instance *instance)
     redsocks_client *tmp, *client = NULL;
     time_t now = redsocks_time(NULL);
     int drop_it = 0;
+    char addr_str[RED_INET_ADDRSTRLEN];
 
-    log_error(LOG_DEBUG, "Audit client list for instance %p(%s):", instance,
-                        instance->relay_ss->name);
+    log_error(LOG_DEBUG, "Audit client list for instance (%s @ %s):",
+              instance->relay_ss->name,
+              red_inet_ntop(&instance->config.bindaddr, addr_str, sizeof(addr_str)));
     list_for_each_entry_safe(client, tmp, &instance->clients, list) {
         drop_it = 0;
 
@@ -1005,7 +1014,7 @@ static void redsocks_fini_instance(redsocks_instance *instance) {
         if (timerisset(&instance->listener.inserted))
             if (tracked_event_del(&instance->listener) != 0)
                 log_errno(LOG_WARNING, "event_del");
-        redsocks_close(EVENT_FD(&instance->listener.ev));
+        redsocks_close(event_get_fd(&instance->listener.ev));
         memset(&instance->listener, 0, sizeof(instance->listener));
     }
 

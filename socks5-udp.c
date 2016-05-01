@@ -87,7 +87,7 @@ static void socks5_client_fini(redudp_client *client)
 	int fd;
 
 	if (event_initialized(&socks5client->udprelay)) {
-		fd = EVENT_FD(&socks5client->udprelay);
+		fd = event_get_fd(&socks5client->udprelay);
 		if (event_del(&socks5client->udprelay) == -1)
 			redudp_log_errno(client, LOG_ERR, "event_del");
 		close(fd);
@@ -127,7 +127,7 @@ static void socks5_forward_pkt(redudp_client *client, struct sockaddr *destaddr,
 	io[1].iov_base = buf;
 	io[1].iov_len = pktlen;
 
-	outgoing = sendmsg(EVENT_FD(&socks5client->udprelay), &msg, 0);
+	outgoing = sendmsg(event_get_fd(&socks5client->udprelay), &msg, 0);
 	if (outgoing == -1) {
 		redudp_log_errno(client, LOG_WARNING, "sendmsg: Can't forward packet, dropping it");
 		return;
@@ -143,15 +143,15 @@ static void socks5_pkt_from_socks(int fd, short what, void *_arg)
 	redudp_client *client = _arg;
 	socks5_client *socks5client = (void*)(client + 1);
 	union {
-		char buf[0xFFFF];
+		char buf[MAX_UDP_PACKET_SIZE];
 		socks5_udp_preabmle header;
-	} pkt;
+	} * pkt = client->instance->shared_buff;
 	ssize_t pktlen, fwdlen;
 	struct sockaddr_in udprelayaddr;
 
-	assert(fd == EVENT_FD(&socks5client->udprelay));
+	assert(fd == event_get_fd(&socks5client->udprelay));
 
-	pktlen = red_recv_udp_pkt(fd, pkt.buf, sizeof(pkt.buf), &udprelayaddr, NULL);
+	pktlen = red_recv_udp_pkt(fd, pkt->buf, MAX_UDP_PACKET_SIZE, &udprelayaddr, NULL);
 	if (pktlen == -1)
 		return;
 
@@ -162,27 +162,27 @@ static void socks5_pkt_from_socks(int fd, short what, void *_arg)
 		return;
 	}
 
-	if (pkt.header.frag_no != 0) {
+	if (pkt->header.frag_no != 0) {
 		// FIXME: does anybody need it?
 		redudp_log_error(client, LOG_WARNING, "Got fragment #%u. Packet fragmentation is not supported!",
-		                 pkt.header.frag_no);
+		                 pkt->header.frag_no);
 		return;
 	}
 
-	if (pkt.header.addrtype != socks5_addrtype_ipv4) {
+	if (pkt->header.addrtype != socks5_addrtype_ipv4) {
 		redudp_log_error(client, LOG_NOTICE, "Got address type #%u instead of expected #%u (IPv4).",
-		                 pkt.header.addrtype, socks5_addrtype_ipv4);
+		                 pkt->header.addrtype, socks5_addrtype_ipv4);
 		return;
 	}
 
 	struct sockaddr_in pktaddr = {
 		.sin_family = AF_INET,
-		.sin_addr   = { pkt.header.ip.addr },
-		.sin_port   = pkt.header.ip.port,
+		.sin_addr   = { pkt->header.ip.addr },
+		.sin_port   = pkt->header.ip.port,
 	};
 
-	fwdlen = pktlen - sizeof(pkt.header);
-    redudp_fwd_pkt_to_sender(client, pkt.buf + sizeof(pkt.header), fwdlen, &pktaddr);
+	fwdlen = pktlen - sizeof(pkt->header);
+	redudp_fwd_pkt_to_sender(client, pkt->buf + sizeof(pkt->header), fwdlen, &pktaddr);
 }
 
 
