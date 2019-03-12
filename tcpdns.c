@@ -1,5 +1,5 @@
 /* redsocks2 - transparent TCP-to-proxy redirector
- * Copyright (C) 2013-2014 Zhuofei Wang <semigodking@gmail.com>
+ * Copyright (C) 2013-2017 Zhuofei Wang <semigodking@gmail.com>
  *
  * This code is based on redsocks project developed by Leonid Evdokimov.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -25,6 +25,7 @@
 #include <assert.h>
 #include <errno.h>
 
+#include "base.h"
 #include "list.h"
 #include "log.h"
 #include "parser.h"
@@ -43,7 +44,7 @@ static int tcpdns_fini();
 
 #define DNS_QR 0x80
 #define DNS_TC 0x02
-#define DNS_Z  0x70
+#define DNS_Z  0x40
 #define DNS_RC_MASK      0x0F
 
 #define DNS_RC_NOERROR   0
@@ -105,7 +106,7 @@ static void tcpdns_readcb(struct bufferevent *from, void *_arg)
     size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
     size_t read_size;
 
-    tcpdns_log_error(LOG_DEBUG, "response size: %d", input_size);
+    tcpdns_log_error(LOG_DEBUG, "response size: %zu", input_size);
 
     if (input_size == 0 || input_size > sizeof(buff))
         // EOF or response is too large. Drop it.
@@ -126,7 +127,7 @@ static void tcpdns_readcb(struct bufferevent *from, void *_arg)
                 case DNS_RC_FORMERR:
                 case DNS_RC_NXDOMAIN:
                     {
-                        int fd = event_get_fd(&req->instance->listener);
+                        int fd = event_get_fd(req->instance->listener);
                         if (sendto(fd, &buff.raw[2], read_size - 2, 0,
                                 (struct sockaddr*)&req->client_addr,
                                 sizeof(req->client_addr)) != read_size - 2) {
@@ -276,7 +277,7 @@ static void tcpdns_pkt_from_client(int fd, short what, void *_arg)
     struct sockaddr_in * destaddr;
     ssize_t pktlen;
 
-    assert(fd == event_get_fd(&self->listener));
+    assert(fd == event_get_fd(self->listener));
     /* allocate and initialize request structure */
     req = (dns_request *)calloc(sizeof(dns_request), 1);
     if (!req)
@@ -304,7 +305,7 @@ static void tcpdns_pkt_from_client(int fd, short what, void *_arg)
     if ( (req->data.header.qr_opcode_aa_tc_rd & DNS_QR) == 0 /* query */
         && (req->data.header.ra_z_rcode & DNS_Z) == 0 /* Z is Zero */
         && req->data.header.qdcount /* some questions */
-        && !req->data.header.ancount && !req->data.header.nscount && !req->data.header.arcount /* no answers */
+        && !req->data.header.ancount && !req->data.header.nscount
     ) 
     {
         tv.tv_sec = self->config.timeout;
@@ -318,7 +319,7 @@ static void tcpdns_pkt_from_client(int fd, short what, void *_arg)
             return;
         }
         /* connect to target directly without going through proxy */
-        req->resolver = red_connect_relay2(destaddr,
+        req->resolver = red_connect_relay(NULL, destaddr,
                         tcpdns_readcb, tcpdns_connected, tcpdns_event_error, req, 
                         &tv);
         if (req->resolver) 
@@ -362,7 +363,9 @@ static parser_entry tcpdns_entries[] =
     { .key = "local_ip",   .type = pt_in_addr },
     { .key = "local_port", .type = pt_uint16 },
     { .key = "tcpdns1",    .type = pt_in_addr },
+    { .key = "tcpdns1_port", .type = pt_uint16 },
     { .key = "tcpdns2",    .type = pt_in_addr },
+    { .key = "tcpdns2_port", .type = pt_uint16 },
     { .key = "timeout",    .type = pt_uint16 },
     { }
 };
@@ -389,10 +392,10 @@ static int tcpdns_onenter(parser_section *section)
     instance->config.udpdns2_addr.sin_port = htons(53);
     instance->config.tcpdns1_addr.sin_family = AF_INET;
     instance->config.tcpdns1_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    instance->config.tcpdns1_addr.sin_port = htons(53);
+    instance->config.tcpdns1_addr.sin_port = 53;
     instance->config.tcpdns2_addr.sin_family = AF_INET;
     instance->config.tcpdns2_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    instance->config.tcpdns2_addr.sin_port = htons(53);
+    instance->config.tcpdns2_addr.sin_port = 53;
 
     for (parser_entry *entry = &section->entries[0]; entry->key; entry++)
         entry->addr =
@@ -401,7 +404,9 @@ static int tcpdns_onenter(parser_section *section)
             (strcmp(entry->key, "udpdns1") == 0)   ? (void*)&instance->config.udpdns1_addr.sin_addr :
             (strcmp(entry->key, "udpdns2") == 0)   ? (void*)&instance->config.udpdns2_addr.sin_addr :
             (strcmp(entry->key, "tcpdns1") == 0)   ? (void*)&instance->config.tcpdns1_addr.sin_addr :
+            (strcmp(entry->key, "tcpdns1_port") == 0) ? (void*)&instance->config.tcpdns1_addr.sin_port :
             (strcmp(entry->key, "tcpdns2") == 0)   ? (void*)&instance->config.tcpdns2_addr.sin_addr :
+            (strcmp(entry->key, "tcpdns2_port") == 0) ? (void*)&instance->config.tcpdns2_addr.sin_port :
             (strcmp(entry->key, "timeout") == 0) ? (void*)&instance->config.timeout :
             NULL;
     section->data = instance;
@@ -425,6 +430,15 @@ static int tcpdns_onexit(parser_section *section)
     if (instance->config.tcpdns1_addr.sin_addr.s_addr == htonl(INADDR_ANY)
         && instance->config.tcpdns2_addr.sin_addr.s_addr == htonl(INADDR_ANY))
         err = "At least one TCP DNS resolver must be configured.";
+
+    if (instance->config.tcpdns1_addr.sin_port == 0)
+        err = "Incorrect port number for TCP DNS1";
+    else
+        instance->config.tcpdns1_addr.sin_port = htons(instance->config.tcpdns1_addr.sin_port);
+    if (instance->config.tcpdns2_addr.sin_port == 0)
+        err = "Incorrect port number for TCP DNS2";
+    else
+        instance->config.tcpdns2_addr.sin_port = htons(instance->config.tcpdns2_addr.sin_port);
 
     if (err)
         parser_error(section->context, "%s", err);
@@ -451,6 +465,8 @@ static int tcpdns_init_instance(tcpdns_instance *instance)
         log_errno(LOG_ERR, "socket");
         goto fail;
     }
+    if (apply_reuseport(fd))
+        log_error(LOG_WARNING, "Continue without SO_REUSEPORT enabled");
 
     error = bind(fd, (struct sockaddr*)&instance->config.bindaddr, sizeof(instance->config.bindaddr));
     if (error) {
@@ -464,8 +480,12 @@ static int tcpdns_init_instance(tcpdns_instance *instance)
         goto fail;
     }
 
-    event_assign(&instance->listener, get_event_base(), fd, EV_READ | EV_PERSIST, tcpdns_pkt_from_client, instance);
-    error = event_add(&instance->listener, NULL);
+    instance->listener = event_new(get_event_base(), fd, EV_READ | EV_PERSIST, tcpdns_pkt_from_client, instance);
+    if (!instance->listener) {
+        log_errno(LOG_ERR, "event_new");
+        goto fail;
+    }
+    error = event_add(instance->listener, NULL);
     if (error)
     {
         log_errno(LOG_ERR, "event_add");
@@ -490,11 +510,12 @@ fail:
  */
 static void tcpdns_fini_instance(tcpdns_instance *instance)
 {
-    if (event_initialized(&instance->listener)) {
-        if (event_del(&instance->listener) != 0)
+    if (instance->listener) {
+        if (event_del(instance->listener) != 0)
             log_errno(LOG_WARNING, "event_del");
-        if (close(event_get_fd(&instance->listener)) != 0)
+        if (close(event_get_fd(instance->listener)) != 0)
             log_errno(LOG_WARNING, "close");
+        event_free(instance->listener);
     }
 
     list_del(&instance->list);

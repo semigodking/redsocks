@@ -40,7 +40,7 @@ typedef enum httpc_state_t {
 } httpc_state;
 
 
-#define HTTP_HEAD_WM_HIGH 4096  // that should be enough for one HTTP line.
+#define HTTP_HEAD_WM_HIGH 8192  // that should be enough for one HTTP line.
 
 
 static void httpc_client_init(redsocks_client *client)
@@ -55,38 +55,24 @@ static void httpc_instance_fini(redsocks_instance *instance)
 	auth->last_auth_query = NULL;
 }
 
-static struct evbuffer *httpc_mkconnect(redsocks_client *client);
-
 extern const char *auth_request_header;
 extern const char *auth_response_header;
 
-static char *get_auth_request_header(struct evbuffer *buf)
-{
-	char *line;
-	for (;;) {
-		line = redsocks_evbuffer_readline(buf);
-		if (line == NULL || *line == '\0' || strchr(line, ':') == NULL) {
-			free(line);
-			return NULL;
-		}
-		if (strncasecmp(line, auth_request_header, strlen(auth_request_header)) == 0)
-			return line;
-		free(line);
-	}
-}
+extern char *get_auth_request_header(struct evbuffer *buf);
 
 void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 {
 	redsocks_client *client = _arg;
 	int dropped = 0;
+	struct evbuffer * evbinput = bufferevent_get_input(buffev);
 
 	assert(client->state >= httpc_request_sent);
 
 	redsocks_touch_client(client);
 
 	if (client->state == httpc_request_sent) {
-		size_t len = EVBUFFER_LENGTH(buffev->input);
-		char *line = redsocks_evbuffer_readline(buffev->input);
+		size_t len = evbuffer_get_length(evbinput);
+		char *line = evbuffer_readln(evbinput, NULL, EVBUFFER_EOL_CRLF_STRICT);
 		if (line) {
 			unsigned int code;
 			if (sscanf(line, "HTTP/%*u.%*u %u", &code) == 1) { // 1 == one _assigned_ match
@@ -104,7 +90,7 @@ void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 
 						dropped = 1;
 					} else {
-						char *auth_request = get_auth_request_header(buffev->input);
+						char *auth_request = get_auth_request_header(evbinput);
 
 						if (!auth_request) {
 							redsocks_log_error(client, LOG_NOTICE, "403 found, but no proxy auth challenge");
@@ -140,7 +126,10 @@ void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 							client->state = httpc_new;
 
 							/* and reconnect */
-							redsocks_connect_relay(client);
+							if (client->instance->relay_ss->connect_relay)
+								client->instance->relay_ss->connect_relay(client);
+							else
+								redsocks_connect_relay(client);
 							return;
 						}
 					}
@@ -164,7 +153,7 @@ void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 		return;
 
 	while (client->state == httpc_reply_came) {
-		char *line = redsocks_evbuffer_readline(buffev->input);
+		char *line = evbuffer_readln(evbinput, NULL, EVBUFFER_EOL_CRLF_STRICT);
 		if (line) {
 			if (strlen(line) == 0) {
 				client->state = httpc_headers_skipped;
@@ -181,7 +170,7 @@ void httpc_read_cb(struct bufferevent *buffev, void *_arg)
 	}
 }
 
-static struct evbuffer *httpc_mkconnect(redsocks_client *client)
+struct evbuffer *httpc_mkconnect(redsocks_client *client)
 {
 	struct evbuffer *buff = NULL, *retval = NULL;
 	int len;

@@ -3,7 +3,14 @@
 
 #include <stddef.h>
 #include <time.h>
-#include <event.h>
+#include <netinet/in.h>
+#include <event2/event.h>
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
+#if defined(ENABLE_HTTPS_PROXY)
+#include <openssl/ssl.h>
+#include <event2/bufferevent_ssl.h>
+#endif
 
 struct sockaddr_in;
 
@@ -50,19 +57,49 @@ struct sockaddr_in;
 uint32_t red_randui32();
 time_t redsocks_time(time_t *t);
 char *redsocks_evbuffer_readline(struct evbuffer *buf);
-struct bufferevent* red_connect_relay_if(const char *ifname,
-                                struct sockaddr_in *addr,
-                                evbuffercb readcb,
-                                evbuffercb writecb,
-                                everrorcb errorcb,
+struct bufferevent* red_prepare_relay(const char *ifname,
+                                bufferevent_data_cb readcb,
+                                bufferevent_data_cb writecb,
+                                bufferevent_event_cb errorcb,
                                 void *cbarg);
-struct bufferevent* red_connect_relay(struct sockaddr_in *addr, evbuffercb readcb, evbuffercb writecb, everrorcb errorcb, void *cbarg);
-struct bufferevent* red_connect_relay2(struct sockaddr_in *addr, evbuffercb readcb, evbuffercb writecb, everrorcb errorcb, void *cbarg, const struct timeval *timeout_write);
+struct bufferevent* red_connect_relay(const char *ifname,
+                                struct sockaddr_in *addr,
+                                bufferevent_data_cb readcb,
+                                bufferevent_data_cb writecb,
+                                bufferevent_event_cb errorcb,
+                                void *cbarg,
+                                const struct timeval *timeout_write);
+#if defined(ENABLE_HTTPS_PROXY)
+struct bufferevent* red_connect_relay_ssl(const char *ifname,
+                                struct sockaddr_in *addr,
+                                SSL * ssl,
+                                bufferevent_data_cb readcb,
+                                bufferevent_data_cb writecb,
+                                bufferevent_event_cb errorcb,
+                                void *cbarg,
+                                const struct timeval *timeout_write);
+#endif
+struct bufferevent* red_connect_relay_tfo(const char *ifname,
+                                struct sockaddr_in *addr,
+                                bufferevent_data_cb readcb,
+                                bufferevent_data_cb writecb,
+                                bufferevent_event_cb errorcb,
+                                void *cbarg,
+                                const struct timeval *timeout_write,
+                                void *data,
+                                size_t *len);
+
 int red_socket_geterrno(struct bufferevent *buffev);
 int red_is_socket_connected_ok(struct bufferevent *buffev);
 int red_recv_udp_pkt(int fd, char *buf, size_t buflen, struct sockaddr_in *fromaddr, struct sockaddr_in *toaddr);
 
-size_t copy_evbuffer(struct bufferevent * dst, const struct bufferevent * src, size_t skip);
+size_t copy_evbuffer(struct bufferevent * dst, struct bufferevent * src, size_t skip);
+size_t get_write_hwm(struct bufferevent *bufev);
+int make_socket_transparent(int fd);
+int apply_tcp_fastopen(int fd);
+void replace_readcb(struct bufferevent * buffev, bufferevent_data_cb readcb);
+void replace_writecb(struct bufferevent * buffev, bufferevent_data_cb writecb);
+void replace_eventcb(struct bufferevent * buffev, bufferevent_event_cb eventcb);
 
 #define event_fmt_str "%s|%s|%s|%s|%s|%s|0x%x"
 #define event_fmt(what) \

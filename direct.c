@@ -1,5 +1,5 @@
 /* redsocks2 - transparent TCP-to-proxy redirector
- * Copyright (C) 2013-2014 Zhuofei Wang <semigodking@gmail.com>
+ * Copyright (C) 2013-2017 Zhuofei Wang <semigodking@gmail.com>
  *
  * This code is based on redsocks project developed by Leonid Evdokimov.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -20,11 +20,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <event.h>
 #include "parser.h"
 #include "log.h"
 #include "main.h"
-#include "base.h"
 #include "redsocks.h"
 #include "utils.h"
 
@@ -54,24 +52,21 @@ static void direct_write_cb(struct bufferevent *buffev, void *_arg)
             // Failed to start relay. Connection is dropped.
             return;
         // Write any data received from client to relay
-        if (evbuffer_get_length(bufferevent_get_input(client->client)))
-            client->instance->relay_ss->writecb(buffev, client);
+        struct evbuffer * input = bufferevent_get_input(client->client);
+        if (evbuffer_get_length(input))
+            if (bufferevent_write_buffer(client->relay, input) == -1)
+                redsocks_log_errno(client, LOG_ERR, "bufferevent_write_buffer");
     }
 }
 
 static int direct_connect_relay(redsocks_client *client)
 {
     char * interface = client->instance->config.interface;
+    struct timeval tv = {client->instance->config.timeout, 0};
+
     // Allowing binding relay socket to specified IP for outgoing connections
-    if (interface && strlen(interface))
-    {
-        client->relay = red_connect_relay_if(interface, 
-                            &client->destaddr, NULL,
-                            redsocks_relay_connected, redsocks_event_error, client);
-    }
-    else
-        client->relay = red_connect_relay(&client->destaddr, NULL,
-                            redsocks_relay_connected, redsocks_event_error, client);
+    client->relay = red_connect_relay(interface, &client->destaddr, NULL,
+                         redsocks_relay_connected, redsocks_event_error, client, &tv);
     if (!client->relay)
     {
         redsocks_log_errno(client, LOG_ERR, "red_connect_relay");

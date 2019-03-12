@@ -55,7 +55,7 @@ void parser_error(parser_context *context, const char *fmt, ...)
 	va_start(ap, fmt);
 	if (buff) {
 		evbuffer_add_vprintf(buff, fmt, ap);
-		msg = (const char*)EVBUFFER_DATA(buff);
+		msg = (const char*)evbuffer_pullup(buff, -1);
 	}
 	else
 		msg = "<Can't print error, not enough memory>";
@@ -516,7 +516,7 @@ int parser_run(parser_context *context)
 								parser_error(context, "section->onenter failed");
 					}
 					else {
-						parser_error(context, "unknown section");
+						parser_error(context, "unknown section <%s>", section_token);
 					}
 					FREE(section_token);
 				}

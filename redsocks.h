@@ -3,7 +3,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <netinet/in.h>
-#include <event.h>
+#include <event2/event.h>
 #include "list.h"
 
 
@@ -16,8 +16,8 @@ typedef struct relay_subsys_t {
 	char   *name;
 	size_t  payload_len; // size of relay-specific data in client section
 	size_t  instance_payload_len; // size of relay-specify data in instance section
-	evbuffercb readcb;
-	evbuffercb writecb;
+	bufferevent_data_cb readcb;
+	bufferevent_data_cb writecb;
 	void       (*init)(struct redsocks_client_t *client);
 	void       (*fini)(struct redsocks_client_t *client);
 	int        (*instance_init)(struct redsocks_instance_t *instance);
@@ -43,7 +43,7 @@ typedef struct redsocks_config_t {
 } redsocks_config;
 
 struct tracked_event {
-	struct event ev;
+	struct event * ev;
 	struct timeval inserted;
 };
 
@@ -78,7 +78,7 @@ void redsocks_touch_client(redsocks_client *client);
 int  redsocks_connect_relay(redsocks_client *client);
 int redsocks_start_relay(redsocks_client *client);
 void redsocks_dump_client(redsocks_client * client, int loglevel);
-void redsocks_shutdown(redsocks_client *client, struct bufferevent *buffev, int how);
+void redsocks_shutdown(redsocks_client *client, struct bufferevent *buffev, int how, int pseudo);
 
 typedef int (*size_comparator)(size_t a, size_t b);
 int sizes_equal(size_t a, size_t b);

@@ -1,5 +1,5 @@
 /* redsocks2 - transparent TCP-to-proxy redirector
- * Copyright (C) 2013-2015 Zhuofei Wang <semigodking@gmail.com>
+ * Copyright (C) 2013-2017 Zhuofei Wang <semigodking@gmail.com>
  *
  * This code is based on redsocks project developed by Leonid Evdokimov.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -19,6 +19,8 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/socket.h>
+#include <event2/bufferevent.h>
+#include <event2/bufferevent_struct.h>
 #include "utils.h"
 #include "log.h"
 #include "redsocks.h"
@@ -34,6 +36,8 @@ typedef enum ss_state_t {
 typedef struct ss_client_t {
     struct enc_ctx e_ctx;
     struct enc_ctx d_ctx;
+    short e_ctx_init;
+    short d_ctx_init;
 } ss_client;
 
 typedef struct ss_instance_t {
@@ -60,30 +64,29 @@ int ss_is_valid_cred(const char *method, const char *password)
 
 static void ss_client_init(redsocks_client *client)
 {
-    ss_client *sclient = (void*)(client + 1);
-    ss_instance * ss = (ss_instance *)(client->instance+1);
-
     client->state = ss_new;
-    if (enc_ctx_init(&ss->info, &sclient->e_ctx, 1))
-        log_error(LOG_ERR, "Shadowsocks failed to initialize encryption context.");
-    if (enc_ctx_init(&ss->info, &sclient->d_ctx, 0))
-        log_error(LOG_ERR, "Shadowsocks failed to initialize decryption context.");
 }
 
 static void ss_client_fini(redsocks_client *client)
 {
     ss_client *sclient = (void*)(client + 1);
-    enc_ctx_free(&sclient->e_ctx);
-    enc_ctx_free(&sclient->d_ctx);
+
+    if (sclient->e_ctx_init) {
+        enc_ctx_free(&sclient->e_ctx);
+        sclient->e_ctx_init = 0;
+    }
+    if (sclient->d_ctx_init) {
+        enc_ctx_free(&sclient->d_ctx);
+        sclient->d_ctx_init = 0;
+    }
 }
 
 static void encrypt_mem(redsocks_client * client,
                       char * data, size_t len,
-                      struct bufferevent * to, int decrypt)
+                      struct evbuffer * buf_out, int decrypt)
 {
     ss_client *sclient = (void*)(client + 1);
     struct evbuffer_iovec vec;
-    struct evbuffer * buf_out = bufferevent_get_output(to);
     size_t required;
     int rc;
 
@@ -120,7 +123,7 @@ static void encrypt_buffer(redsocks_client *client,
         return;
 
     input = (char *)evbuffer_pullup(buf_in, input_size);    
-    encrypt_mem(client, input, input_size, to, 0);
+    encrypt_mem(client, input, input_size, bufferevent_get_output(to), 0);
     evbuffer_drain(buf_in, input_size);
 }
 
@@ -137,7 +140,7 @@ static void decrypt_buffer(redsocks_client * client,
         return;
 
     input = (char *)evbuffer_pullup(buf_in, input_size);
-    encrypt_mem(client, input, input_size, to, 1);
+    encrypt_mem(client, input, input_size, bufferevent_get_output(to), 1);
     evbuffer_drain(buf_in, input_size);
 }
 
@@ -159,7 +162,7 @@ static void ss_client_writecb(struct bufferevent *buffev, void *_arg)
     if (client->state == ss_connected) 
     {
         /* encrypt and forward data received from client side */
-        if (output_size < to->wm_write.high)
+        if (output_size < get_write_hwm(to))
         {
             if (input_size)
                 decrypt_buffer(client, from, to);
@@ -186,7 +189,7 @@ static void ss_client_readcb(struct bufferevent *buffev, void *_arg)
     if (client->state == ss_connected)
     {
         /* encrypt and forward data to the other side  */
-        if (output_size < to->wm_write.high)
+        if (output_size < get_write_hwm(to))
         {
             encrypt_buffer(client, from, to);
             if (bufferevent_enable(from, EV_READ) == -1)
@@ -222,7 +225,7 @@ static void ss_relay_writecb(struct bufferevent *buffev, void *_arg)
     if (client->state == ss_connected) 
     {
         /* encrypt and forward data received from client side */
-        if (output_size < to->wm_write.high)
+        if (output_size < get_write_hwm(to))
         {
             if (input_size)
                 encrypt_buffer(client, from, to);
@@ -250,7 +253,7 @@ static void ss_relay_readcb(struct bufferevent *buffev, void *_arg)
     if (client->state == ss_connected)
     {
         /* decrypt and forward data to client side */
-        if (output_size < to->wm_write.high)
+        if (output_size < get_write_hwm(to))
         {
             if (input_size)
                 decrypt_buffer(client, from, to);
@@ -272,8 +275,6 @@ static void ss_relay_readcb(struct bufferevent *buffev, void *_arg)
 static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
 {
     redsocks_client *client = _arg;
-    ss_header_ipv4 header;
-    size_t len = 0;
 
     assert(buffev == client->relay);
     assert(client->state == ss_new);
@@ -286,6 +287,8 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
     }
 
     client->relay_connected = 1;
+    client->state = ss_connected; 
+
     /* We do not need to detect timeouts any more.
     The two peers will handle it. */
     bufferevent_set_timeouts(client->relay, NULL, NULL);
@@ -302,17 +305,6 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
                                      ss_relay_writecb,
                                      redsocks_event_error,
                                      client);
-
-    /* build and send header */
-    // TODO: Better implementation and IPv6 Support
-    header.addr_type = ss_addrtype_ipv4;
-    header.addr = client->destaddr.sin_addr.s_addr;
-    header.port = client->destaddr.sin_port;
-    len += sizeof(header);
-    encrypt_mem(client, (char *)&header, len, client->relay, 0);
-
-    client->state = ss_connected; 
-
     // Write any data received from client side to relay.
     if (evbuffer_get_length(bufferevent_get_input(client->client)))
         ss_relay_writecb(client->relay, client);
@@ -323,16 +315,53 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
 
 static int ss_connect_relay(redsocks_client *client)
 {
+    char * interface = client->instance->config.interface;
+    ss_client *sclient = (void*)(client + 1);
+    ss_instance * ss = (ss_instance *)(client->instance+1);
+    ss_header_ipv4 header;
     struct timeval tv;
+    size_t len = 0;
+    char buff[64+sizeof(header)];
+
+    if (enc_ctx_init(&ss->info, &sclient->e_ctx, 1)) {
+        log_error(LOG_ERR, "Shadowsocks failed to initialize encryption context.");
+        redsocks_drop_client(client);
+        return -1;
+    }
+    sclient->e_ctx_init = 1;  
+    if (enc_ctx_init(&ss->info, &sclient->d_ctx, 0)) {
+        log_error(LOG_ERR, "Shadowsocks failed to initialize decryption context.");
+        redsocks_drop_client(client);
+        return -1;
+    }
+    sclient->d_ctx_init = 1;
+
+    /* build and send header */
+    // TODO: Better implementation and IPv6 Support
+    header.addr_type = ss_addrtype_ipv4;
+    header.addr = client->destaddr.sin_addr.s_addr;
+    header.port = client->destaddr.sin_port;
+    len += sizeof(header);
+    size_t sz = sizeof(buff);
+    if (!ss_encrypt(&sclient->e_ctx, (char *)&header, len, &buff[0], &sz)) {
+        log_error(LOG_ERR, "Encryption error.");
+        redsocks_drop_client(client);
+        return -1;
+    }
+    len = sz;
 
     tv.tv_sec = client->instance->config.timeout;
     tv.tv_usec = 0;
-    client->relay = red_connect_relay2(&client->instance->config.relayaddr,
+    client->relay = red_connect_relay_tfo(interface, &client->instance->config.relayaddr,
                     NULL, ss_relay_connected, redsocks_event_error, client, 
-                    &tv);
+                    &tv, &buff[0], &sz);
 
     if (!client->relay) {
-        redsocks_log_errno(client, LOG_ERR, "ss_connect_relay");
+        redsocks_drop_client(client);
+        return -1;
+    }
+    else if (sz && sz != len) {
+        log_error(LOG_ERR, "Unexpected length of data sent.");
         redsocks_drop_client(client);
         return -1;
     }

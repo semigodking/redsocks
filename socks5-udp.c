@@ -1,5 +1,5 @@
 /* redsocks2 - transparent TCP-to-proxy redirector
- * Copyright (C) 2013-2015 Zhuofei Wang <semigodking@gmail.com>
+ * Copyright (C) 2013-2017 Zhuofei Wang <semigodking@gmail.com>
  *
  * This code is based on redsocks project developed by Leonid Evdokimov.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -20,6 +20,8 @@
 #include <string.h>
 #include <assert.h>
 #include <sys/socket.h>
+#include <event2/bufferevent.h>
+#include <event2/bufferevent_struct.h>
 #include "main.h"
 #include "utils.h"
 #include "log.h"
@@ -191,7 +193,7 @@ static void socks5_read_assoc_reply(struct bufferevent *buffev, void *_arg)
 	redudp_client *client = _arg;
 	socks5_client *socks5client = (void*)(client + 1);
 	socks5_expected_assoc_reply reply;
-	int read = evbuffer_remove(buffev->input, &reply, sizeof(reply));
+	int read = evbuffer_remove(bufferevent_get_input(buffev), &reply, sizeof(reply));
 	int fd = -1;
 	int error;
 	redudp_log_error(client, LOG_DEBUG, "<trace>");
@@ -266,7 +268,7 @@ static void socks5_read_auth_reply(struct bufferevent *buffev, void *_arg)
 	redudp_client *client = _arg;
 	socks5_client *socks5client = (void*)(client + 1);
 	socks5_auth_reply reply;
-	int read = evbuffer_remove(buffev->input, &reply, sizeof(reply));
+	int read = evbuffer_remove(bufferevent_get_input(buffev), &reply, sizeof(reply));
 	int error;
 	redudp_log_error(client, LOG_DEBUG, "<trace>");
 
@@ -288,8 +290,7 @@ static void socks5_read_auth_reply(struct bufferevent *buffev, void *_arg)
 	if (error)
 		goto fail;
 
-	socks5client->relay->readcb = socks5_read_assoc_reply;
-
+	replace_readcb(socks5client->relay, socks5_read_assoc_reply);
 	return;
 
 fail:
@@ -303,7 +304,7 @@ static void socks5_read_auth_methods(struct bufferevent *buffev, void *_arg)
 	socks5_client *socks5client = (void*)(client + 1);
 	int do_password = socks5_is_valid_cred(client->instance->config.login, client->instance->config.password);
 	socks5_method_reply reply;
-	int read = evbuffer_remove(buffev->input, &reply, sizeof(reply));
+	int read = evbuffer_remove(bufferevent_get_input(buffev), &reply, sizeof(reply));
 	const char *error = NULL;
 	int ierror = 0;
 	redudp_log_error(client, LOG_DEBUG, "<trace>");
@@ -326,7 +327,7 @@ static void socks5_read_auth_methods(struct bufferevent *buffev, void *_arg)
 		if (ierror)
 			goto fail;
 
-		socks5client->relay->readcb = socks5_read_assoc_reply;
+		replace_readcb(socks5client->relay, socks5_read_assoc_reply);
 	}
 	else if (reply.method == socks5_auth_password) {
 		ierror = redsocks_write_helper_ex_plain(
@@ -335,7 +336,7 @@ static void socks5_read_auth_methods(struct bufferevent *buffev, void *_arg)
 		if (ierror)
 			goto fail;
 
-		socks5client->relay->readcb = socks5_read_auth_reply;
+		replace_readcb(socks5client->relay, socks5_read_auth_reply);
 	}
 
 	return;
@@ -364,8 +365,8 @@ static void socks5_relay_connected(struct bufferevent *buffev, void *_arg)
 	if (error)
 		goto fail;
 
-	socks5client->relay->readcb = socks5_read_auth_methods;
-	socks5client->relay->writecb = 0;
+	replace_readcb(socks5client->relay, socks5_read_auth_methods);
+	replace_writecb(socks5client->relay, NULL);
 	//bufferevent_disable(buffev, EV_WRITE); // I don't want to check for writeability.
 	return;
 
@@ -385,8 +386,8 @@ static void socks5_relay_error(struct bufferevent *buffev, short what, void *_ar
 static void socks5_connect_relay(redudp_client *client)
 {
 	socks5_client *socks5client = (void*)(client + 1);
-	socks5client->relay = red_connect_relay(&client->instance->config.relayaddr, NULL, 
-	                                  socks5_relay_connected, socks5_relay_error, client);
+	socks5client->relay = red_connect_relay(NULL, &client->instance->config.relayaddr, NULL, 
+	                                  socks5_relay_connected, socks5_relay_error, client, NULL);
 	if (!socks5client->relay)
 		redudp_drop_client(client);
 }

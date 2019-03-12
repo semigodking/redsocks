@@ -32,12 +32,27 @@
 # include <limits.h>
 # include <linux/netfilter_ipv4.h>
 #endif
+
 #if defined USE_PF
 # include <net/if.h>
+#if defined _APPLE_
+#define PRIVATE
+#endif
 # include <net/pfvar.h>
+#if defined _APPLE_
+#define sport sxport.port
+#define dport dxport.port
+#define rdport rdxport.port
+#undef PRIVATE
+#endif
 # include <sys/ioctl.h>
 #endif
-# include <errno.h>
+#ifdef __FreeBSD__
+# include <netinet/ip_fil.h>
+# include <netinet/ip_nat.h>
+#endif
+
+#include <errno.h>
 #include "log.h"
 #include "main.h"
 #include "parser.h"
@@ -63,6 +78,9 @@ typedef struct base_instance_t {
 	bool log_debug;
 	bool log_info;
 	bool daemon;
+#ifdef SO_REUSEPORT
+	bool reuseport;
+#endif
 #if defined(TCP_KEEPIDLE) && defined(TCP_KEEPCNT) && defined(TCP_KEEPINTVL)
 	uint16_t tcp_keepalive_time;
 	uint16_t tcp_keepalive_probes;
@@ -251,9 +269,11 @@ int apply_tcp_keepalive(int fd)
 {
 	struct { int level, option, value; } opt[] = {
 		{ SOL_SOCKET, SO_KEEPALIVE, 1 },
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPCNT) && defined(TCP_KEEPINTVL)
 		{ IPPROTO_TCP, TCP_KEEPIDLE, instance.tcp_keepalive_time },
 		{ IPPROTO_TCP, TCP_KEEPCNT, instance.tcp_keepalive_probes },
 		{ IPPROTO_TCP, TCP_KEEPINTVL, instance.tcp_keepalive_intvl },
+#endif
 	};
 	for (int i = 0; i < SIZEOF_ARRAY(opt); ++i) {
 		if (opt[i].value) {
@@ -265,6 +285,22 @@ int apply_tcp_keepalive(int fd)
 		}
 	}
 	return 0;
+}
+
+int apply_reuseport(int fd)
+{
+#ifdef SO_REUSEPORT
+    if (!instance.reuseport)
+        return 0;
+
+    int opt = 1;
+    int rc = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    if (rc == -1)
+        log_errno(LOG_ERR, "setsockopt");
+    return rc;
+#else
+    return -1;
+#endif
 }
 
 static redirector_subsys redirector_subsystems[] =
@@ -298,6 +334,9 @@ static parser_entry base_entries[] =
 	{ .key = "tcp_keepalive_time",   .type = pt_uint16, .addr = &instance.tcp_keepalive_time },
 	{ .key = "tcp_keepalive_probes", .type = pt_uint16, .addr = &instance.tcp_keepalive_probes },
 	{ .key = "tcp_keepalive_intvl",  .type = pt_uint16, .addr = &instance.tcp_keepalive_intvl },
+#endif
+#ifdef SO_REUSEPORT
+	{ .key = "reuseport",  .type = pt_bool,    .addr = &instance.reuseport},
 #endif
 	{ }
 };
@@ -441,7 +480,7 @@ static int base_init()
 			exit(EXIT_SUCCESS);
 		}
 	}
-    
+
 	log_open(); // child has nothing to do with TTY
 
 	if (instance.daemon) {

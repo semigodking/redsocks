@@ -21,6 +21,9 @@ base {
 	 * privilegies on startup.
 	 * Note, your chroot may requre /etc/localtime if you write log to syslog.
 	 * Log is opened before chroot & uid changing.
+	 * Debian, Ubuntu and some other distributions use `nogroup` instead of
+	 * `nobody`, so change it according to your system if you want redsocks
+	 * to drop root privileges.
 	 */
 	// user = nobody;
 	// group = nobody;
@@ -40,6 +43,13 @@ base {
 	//tcp_keepalive_time = 0;
 	//tcp_keepalive_probes = 0;
 	//tcp_keepalive_intvl = 0;
+
+	/* Enable or disable Linux 3.9+ specific socket option SO_REUSEPORT.
+	 * Some older versions of Linux like CentOS 6.5 (Kernel 2.6.32) also
+	 # support this option.
+	 * Default to off.
+	 */
+	reuseport = off;
 }
 
 redsocks {
@@ -70,13 +80,13 @@ redsocks {
 	port = 1080;
 
 	// known types: socks4, socks5, http-connect, http-relay
-	// New types: direct, shadowsocks
+	// New types: direct, shadowsocks, https-connect
 	type = socks5;
 
-    // Specify interface for outgoing connections when 'direct' type
-    // is used. This is useful when you have multiple connections to
-    // internet or you have VPN connections.
-    // interface = tun0;
+	// Specify interface for outgoing connections.
+	// This is useful when you have multiple connections to
+	// internet or when you have VPN connections.
+	// interface = tun0;
 
 	// Change this parameter to 1 if you want auto proxy feature. 
 	// When autoproxy is set to non-zero, the connection to target
@@ -137,11 +147,18 @@ tcpdns {
 	local_ip = 192.168.1.1; // Local server to act as DNS server
 	local_port = 1053;      // UDP port to receive UDP DNS requests
 	tcpdns1 = 8.8.4.4;      // DNS server that supports TCP DNS requests
+	tcpdns1_port = 53;      // DNS server port, default 53
 	tcpdns2 = 8.8.8.8;      // DNS server that supports TCP DNS requests
+	tcpdns2_port = 53;      // DNS server port, default 53
 	timeout = 4;            // Timeout value for TCP DNS requests
 }
 
 autoproxy {
+    // Specify interface for outgoing connections.
+    // This is useful when you have multiple connections to
+    // internet or when you have VPN connections.
+    // interface = wlan0;
+
     no_quick_check_seconds = 60; // Directly relay traffic to proxy if an IP
                                  // is found blocked in cache and it has been
                                  // added into cache no earlier than this
