@@ -1001,8 +1001,11 @@ static int redsocks_init_instance(redsocks_instance *instance)
     if (apply_reuseport(fd))
         log_error(LOG_WARNING, "Continue without SO_REUSEPORT enabled");
 
-    // error = bind(fd, (struct sockaddr*)&instance->config.bindaddr, sizeof(instance->config.bindaddr));
+#ifdef __APPLE__
     bindaddr_len = instance->config.bindaddr.ss_len > 0 ? instance->config.bindaddr.ss_len : sizeof(instance->config.bindaddr);
+#else
+    bindaddr_len = sizeof(instance->config.bindaddr);
+#endif
     error = bind(fd, (struct sockaddr*)&instance->config.bindaddr, bindaddr_len);
     if (error) {
         log_errno(LOG_ERR, "bind");
