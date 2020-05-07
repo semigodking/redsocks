@@ -547,24 +547,20 @@ static int cipher_context_init(const enc_info * info, cipher_ctx_t *ctx, int enc
     }
 #endif
 
-    cipher_evp_t *evp = ctx->evp;
+    cipher_evp_t *evp = &ctx->evp;
     const cipher_kt_t *cipher = get_cipher_type(method);
 #if defined(USE_CRYPTO_OPENSSL)
     if (cipher == NULL) {
         // Cipher is not found in OpenSSL library
         return -1;
     }
-    // for openssl 1.1
-    evp = EVP_CIPHER_CTX_new();
     EVP_CIPHER_CTX_init(evp);
     if (!EVP_CipherInit_ex(evp, cipher, NULL, NULL, NULL, enc)) {
         // annot initialize cipher
         return -1; 
     }
     if (!EVP_CIPHER_CTX_set_key_length(evp, info->key_len)) {
-        // for openssl 1.1
-        //EVP_CIPHER_CTX_cleanup(evp);
-        EVP_CIPHER_CTX_free(evp);
+        EVP_CIPHER_CTX_cleanup(evp);
         // Invalid key length
         return -1;
     }
@@ -646,16 +642,14 @@ static void cipher_context_set_iv(const enc_info * info, cipher_ctx_t *ctx, uint
     }
 #endif
 
-    cipher_evp_t *evp = ctx->evp;
+    cipher_evp_t *evp = &ctx->evp;
     if (evp == NULL) {
         //LOGE("cipher_context_set_iv(): Cipher context is null");
         return;
     }
 #if defined(USE_CRYPTO_OPENSSL)
     if (!EVP_CipherInit_ex(evp, NULL, NULL, true_key, iv, enc)) {
-        // for openssl 1.1
-        //EVP_CIPHER_CTX_cleanup(evp);
-        EVP_CIPHER_CTX_free(evp);
+        EVP_CIPHER_CTX_cleanup(evp);
         //FATAL("Cannot set key and IV");
     }
 #elif defined(USE_CRYPTO_POLARSSL)
@@ -702,11 +696,9 @@ static void cipher_context_release(enc_info * info, cipher_ctx_t *ctx)
     }
 #endif
 
-    cipher_evp_t *evp = ctx->evp;
+    cipher_evp_t *evp = &ctx->evp;
 #if defined(USE_CRYPTO_OPENSSL)
-    // for openssl 1.1
-    //EVP_CIPHER_CTX_cleanup(evp);
-    EVP_CIPHER_CTX_free(evp);
+    EVP_CIPHER_CTX_cleanup(evp);
 #elif defined(USE_CRYPTO_POLARSSL)
     cipher_free_ctx(evp);
 #endif
@@ -724,7 +716,7 @@ static int cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, int *olen,
         return (ret == kCCSuccess) ? 1 : 0;
     }
 #endif
-    cipher_evp_t *evp = ctx->evp;
+    cipher_evp_t *evp = &ctx->evp;
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_CipherUpdate(evp, (uint8_t *)output, olen,
                             (const uint8_t *)input, (size_t)ilen);
@@ -749,9 +741,9 @@ size_t ss_calc_buffer_size(struct enc_ctx * ctx, size_t ilen)
         return ilen;
     }
     if (ctx->init)
-        return ilen + cipher_get_block_size(ctx->evp.evp);
+        return ilen + cipher_get_block_size(&ctx->evp.evp);
     else
-        return cipher->iv_size + ilen + cipher_get_block_size(ctx->evp.evp);
+        return cipher->iv_size + ilen + cipher_get_block_size(&ctx->evp.evp);
 #endif
 }
 
@@ -924,10 +916,7 @@ static int enc_key_init(enc_info * info, int method, const char *pass)
     uint8_t iv[MAX_IV_LENGTH];
 
     cipher_kt_t *cipher = NULL;
-
-#if defined(USE_CRYPTO_POLARSSL) && defined(USE_CRYPTO_APPLECC)
     cipher_kt_t cipher_info;
-#endif
 
 
     if (method == SALSA20 || method == CHACHA20) {

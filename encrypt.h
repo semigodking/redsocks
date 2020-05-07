@@ -89,7 +89,7 @@ typedef struct {
 #endif
 
 typedef struct {
-    cipher_evp_t *evp;
+    cipher_evp_t evp;
 #ifdef USE_CRYPTO_APPLECC
     cipher_cc_t cc;
 #endif
