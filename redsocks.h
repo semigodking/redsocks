@@ -36,6 +36,8 @@ typedef struct redsocks_config_t {
 	char *type;
 	char *login;
 	char *password;
+	bool parse_sni_host;
+	bool parse_http_host;
 	uint16_t min_backoff_ms;
 	uint16_t max_backoff_ms; // backoff capped by 65 seconds is enough :)
 	uint16_t listenq;
@@ -66,6 +68,7 @@ typedef struct redsocks_client_t {
 	struct bufferevent *relay;
 	struct sockaddr_storage  clientaddr;
 	struct sockaddr_storage  destaddr;
+	char               *hostname;
 	int                 state;         // it's used by bottom layer
 	short               relay_connected;
 	unsigned short      client_evshut;
