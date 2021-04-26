@@ -1,15 +1,18 @@
 ifdef DISABLE_SHADOWSOCKS
 OBJS := parser.o main.o redsocks.o log.o direct.o ipcache.o autoproxy.o http-connect.o \
         socks4.o socks5.o http-relay.o base.o base64.o md5.o http-auth.o utils.o redudp.o socks5-udp.o \
-        tcpdns.o gen/version.o
+        tcpdns.o tls.o gen/version.o
 CFLAGS +=-fPIC -O3 -DDISABLE_SHADOWSOCKS
 FEATURES += DISABLE_SHADOWSOCKS
 else
 OBJS := parser.o main.o redsocks.o log.o direct.o ipcache.o autoproxy.o encrypt.o shadowsocks.o http-connect.o \
         socks4.o socks5.o http-relay.o base.o base64.o md5.o http-auth.o utils.o redudp.o socks5-udp.o shadowsocks-udp.o \
-        tcpdns.o gen/version.o
+        tcpdns.o tls.o gen/version.o
 CFLAGS +=-fPIC -O3
 endif
+
+LIBHTTP_CFLAGS := -I./http-parser -L./http-parser
+
 SRCS := $(OBJS:.o=.c)
 CONF := config.h
 DEPS := .depend
@@ -18,6 +21,10 @@ VERSION := 0.68
 OS := $(shell uname)
 
 LIBS := -levent
+
+LIBS += -lhttp_parser
+CFLAGS += $(LIBHTTP_CFLAGS)
+
 override CFLAGS += -D_BSD_SOURCE -D_DEFAULT_SOURCE -Wall
 ifeq ($(OS), Linux)
 override CFLAGS += -std=c99 -D_XOPEN_SOURCE=600
@@ -63,10 +70,18 @@ endif
 
 all: $(OUT)
 
-.PHONY: all clean distclean
+.PHONY: all clean distclean http-parser
 
 tags: *.c *.h
 	ctags -R
+
+http-parser-download:
+	git submodule update --init
+
+http-parser-build:
+	cd http-parser && make package
+
+http-parser: http-parser-download http-parser-build
 
 $(CONF):
 	@case $(OS) in \
@@ -149,8 +164,8 @@ $(DEPS): $(OSX_HEADERS) $(SRCS)
 
 -include $(DEPS)
 
-$(OUT): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+$(OUT): http-parser $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LIBS)
 
 clean:
 	$(RM) $(CONF) $(OBJS)
@@ -160,3 +175,4 @@ distclean: clean
 	$(RM) tags $(DEPS)
 	$(RM) -r gen
 	$(RM) -r $(OSX_ROOT_PATH)
+	cd http-parser && make clean
