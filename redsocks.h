@@ -5,7 +5,7 @@
 #include <netinet/in.h>
 #include <event2/event.h>
 #include "list.h"
-
+#include <stdbool.h>
 
 #define DEFAULT_CONNECT_TIMEOUT 10 
 
