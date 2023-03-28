@@ -573,5 +573,13 @@ void replace_eventcb(struct bufferevent * buffev, bufferevent_event_cb eventcb)
 #endif
 }
 
+int sockaddr_storage_compare(struct sockaddr_storage *lhs, struct sockaddr_storage *rhs)
+{
+    size_t lhs_size = addr_size(lhs);
+    size_t rhs_size = addr_size(rhs);
+    size_t larger_size = (lhs_size > rhs_size) ? lhs_size : rhs_size;
+    return memcmp(lhs, rhs, larger_size);
+}
+
 
 /* vim:set tabstop=4 softtabstop=4 shiftwidth=4: */

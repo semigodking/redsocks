@@ -413,7 +413,7 @@ static void redudp_pkt_from_client(int fd, short what, void *_arg)
 
     // TODO: this lookup may be SLOOOOOW.
     list_for_each_entry(tmp, &self->clients, list) {
-        if (0 == memcmp(&clientaddr, &tmp->clientaddr, sizeof(clientaddr))) {
+        if (0 == sockaddr_storage_compare(&clientaddr, &tmp->clientaddr)) {
             client = tmp;
             break;
         }

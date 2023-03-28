@@ -102,6 +102,8 @@ void replace_readcb(struct bufferevent * buffev, bufferevent_data_cb readcb);
 void replace_writecb(struct bufferevent * buffev, bufferevent_data_cb writecb);
 void replace_eventcb(struct bufferevent * buffev, bufferevent_event_cb eventcb);
 
+int sockaddr_storage_compare(struct sockaddr_storage *lhs, struct sockaddr_storage *rhs);
+
 #define event_fmt_str "%s|%s|%s|%s|%s|%s|0x%x"
 #define event_fmt(what) \
 				(what) & BEV_EVENT_READING ? "READING" : "0", \
