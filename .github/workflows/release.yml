@@ -17,9 +17,9 @@ jobs:
         echo "deb http://security.ubuntu.com/ubuntu bionic-security main" | sudo tee -a /etc/apt/sources.list
         sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
         sudo apt update
-        sudo apt install -y libssl1.0-dev libevent-dev
+        sudo apt install -y libssl1.0-dev libevent-dev zlib1g-dev
     - name: Build
-      run: make ENABLE_HTTPS_PROXY=1 ENABLE_STATIC=1
+      run: make ENABLE_STATIC=1
     - name: Release
       uses: softprops/action-gh-release@v1
       with:
