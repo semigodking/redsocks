@@ -19,8 +19,11 @@ jobs:
         sudo apt update
         sudo apt install -y libssl1.0-dev libevent-dev zlib1g-dev
     - name: Build
-      run: make ENABLE_STATIC=1
+      run: |
+        mkdir release
+        make ENABLE_STATIC=1
+        mv redsocks2 redsocks2-`arch`-`grep VERSION Makefile | head -n 1 | cut -d ' ' -f 3`
     - name: Release
       uses: softprops/action-gh-release@v1
       with:
-        files: redsocks2
+        files: release/*
