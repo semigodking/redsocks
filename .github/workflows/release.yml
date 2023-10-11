@@ -22,7 +22,7 @@ jobs:
       run: |
         mkdir release
         make ENABLE_STATIC=1
-        mv redsocks2 redsocks2-`arch`-`grep VERSION Makefile | head -n 1 | cut -d ' ' -f 3`
+        mv redsocks2 release/redsocks2-`arch`-${{github.ref_name}}
     - name: Release
       uses: softprops/action-gh-release@v1
       with:
