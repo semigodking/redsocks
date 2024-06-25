@@ -312,7 +312,11 @@ static void socks5_read_assoc_reply(struct bufferevent *buffev, void *_arg)
         goto fail;
     }
 
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    error = connect(fd, (struct sockaddr*)&socks5client->udprelayaddr, sizeof(struct sockaddr_in));
+#else
     error = connect(fd, (struct sockaddr*)&socks5client->udprelayaddr, sizeof(socks5client->udprelayaddr));
+#endif
     if (error) {
         redudp_log_errno(client, LOG_NOTICE, "connect");
         goto fail;

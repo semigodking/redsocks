@@ -1,3 +1,4 @@
+
 /* redsocks2 - transparent TCP/UDP-to-proxy redirector
  * Copyright (C) 2013-2017 Zhuofei Wang <semigodking@gmail.com>
  *
@@ -133,6 +134,22 @@ static int bound_udp_get(const struct sockaddr *addr)
     node->key = key;
     node->ref = 1;
     node->fd = socket(addr->sa_family, SOCK_DGRAM, IPPROTO_UDP);
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    int on = 1;
+#if defined(__FreeBSD__)
+#ifdef SOL_IPV6
+    if (addr->sa_family == AF_INET) {
+#endif
+        setsockopt(node->fd, IPPROTO_IP, IP_BINDANY, &on, sizeof(on));
+#ifdef SOL_IPV6
+    } else {
+        setsockopt(node->fd, IPPROTO_IPV6, IPV6_BINDANY, &on, sizeof(on));
+    }
+#endif
+#else
+    setsockopt(node->fd, SOL_SOCKET, SO_BINDANY, &on, sizeof(on));
+#endif
+#endif
     node->t_last_rx = redsocks_time(NULL);
     if (node->fd == -1) {
         log_errno(LOG_ERR, "socket");
@@ -300,8 +317,13 @@ void redudp_fwd_pkt_to_sender(redudp_client *client, void *buf, size_t len,
     }
     // TODO: record remote address in client
 
+
     sent = sendto(fd, buf, len, 0,
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+                  (struct sockaddr*)&client->clientaddr, sizeof(struct sockaddr_in));
+#else
                   (struct sockaddr*)&client->clientaddr, sizeof(client->clientaddr));
+#endif
     if (sent != len) {
         redudp_log_error(
             client,
@@ -638,6 +660,10 @@ static int redudp_init_instance(redudp_instance *instance)
                 log_errno(LOG_ERR, "setsockopt(listener, SOL_IP, IP_RECVORIGDSTADDR)");
                 goto fail;
             }
+#if defined(__OpenBSD__) || defined(__NetBSD__)
+            setsockopt(fd, IPPROTO_IP, IP_RECVDSTADDR, &on, sizeof(on));
+            setsockopt(fd, IPPROTO_IP, IP_RECVDSTPORT, &on, sizeof(on));
+#endif
 #ifdef SOL_IPV6
         }
         else {
@@ -646,6 +672,10 @@ static int redudp_init_instance(redudp_instance *instance)
                 log_errno(LOG_ERR, "setsockopt(listener, SOL_IPV6, IPV6_RECVORIGDSTADDR)");
                 goto fail;
             }
+#if defined(__OpenBSD__) || defined(__NetBSD__)
+            setsockopt(fd, IPPROTO_IP, IPV6_RECVPKTINFO, &on, sizeof(on));
+            setsockopt(fd, IPPROTO_IP, IPV6_RECVDSTPORT, &on, sizeof(on));
+#endif
         }
 #endif
         log_error(LOG_INFO, "redudp @ %s: TPROXY", red_inet_ntop(&instance->config.bindaddr, buf1, sizeof(buf1)));
@@ -660,7 +690,7 @@ static int redudp_init_instance(redudp_instance *instance)
     if (apply_reuseport(fd))
         log_error(LOG_WARNING, "Continue without SO_REUSEPORT enabled");
 
-#if defined(__APPLE__) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     bindaddr_len = instance->config.bindaddr.ss_len > 0 ? instance->config.bindaddr.ss_len : sizeof(instance->config.bindaddr);
 #else
     bindaddr_len = sizeof(instance->config.bindaddr);

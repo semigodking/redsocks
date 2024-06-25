@@ -42,7 +42,7 @@
 #   define SOL_IP IPPROTO_IP
 #endif
 
-#ifdef __FreeBSD__
+#if defined __FreeBSD__ || defined __OpenBSD__ || defined __NetBSD__
 #ifndef INADDR_LOOPBACK
 #   warning Using hardcoded value for INADDR_LOOPBACK for FreeBSD.
 #   define INADDR_LOOPBACK		0x7F000001

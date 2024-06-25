@@ -95,7 +95,7 @@ static base_instance instance = {
 	.log_info = false,
 };
 
-#if defined __FreeBSD__ || defined USE_PF
+#if defined __FreeBSD__ || defined USE_PF  || defined __OpenBSD__ || defined __NetBSD__
 static int redir_open_private(const char *fname, int flags)
 {
 	int fd = open(fname, flags);

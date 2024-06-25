@@ -98,14 +98,29 @@ int red_recv_udp_pkt(
                 }
                 break;
             }
+#if defined(__OpenBSD__) || defined(__NetBSD__)
+            //TODO: support IPv6
+            else if (cmsg->cmsg_type == IP_RECVDSTADDR || cmsg->cmsg_type == IP_RECVDSTPORT){
+                struct sockaddr* cmsgaddr = (struct sockaddr*)CMSG_DATA(cmsg);
+                toaddr->ss_family=AF_INET;
+                struct sockaddr_in *toaddr_in = (struct sockaddr_in *)toaddr;
+                if (cmsg->cmsg_type == IP_RECVDSTADDR) {
+                    memcpy(&toaddr_in->sin_addr, cmsgaddr, sizeof(struct in_addr));
+                } else if (cmsg->cmsg_type == IP_RECVDSTPORT) {
+                    memcpy(&toaddr_in->sin_port, cmsgaddr, sizeof(in_port_t));
+                }
+            }
+#endif
             else {
                 log_error(LOG_WARNING, "unexepcted cmsg (level,type) = (%d,%d)",
                     cmsg->cmsg_level, cmsg->cmsg_type);
             }
         }
         if (toaddr->ss_family == 0) {
+#if !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
             log_error(LOG_WARNING, "(SOL_IP, IP_ORIGDSTADDR) not found");
             return -1;
+#endif
         }
     }
 
