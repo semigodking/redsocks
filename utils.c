@@ -266,7 +266,7 @@ struct bufferevent* red_connect_relay_ssl(const char *ifname,
     if (timeout_write)
         bufferevent_set_timeouts(underlying, NULL, timeout_write);
 
-    error = connect(relay_fd, addr, addr_size(addr));
+    error = connect(relay_fd, (struct sockaddr *)addr, addr_size(addr));
     if (error && errno != EINPROGRESS) {
         log_errno(LOG_NOTICE, "connect");
         goto fail;
