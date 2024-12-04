@@ -51,7 +51,10 @@ static struct evbuffer* socks5_mkpassword_plain_wrapper(void *p)
 
 static struct evbuffer* socks5_mkassociate(void *p)
 {
-    return socks5_mkcommand_plain(socks5_cmd_udp_associate, p);
+    struct sockaddr_storage sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.ss_family = ((const struct sockaddr_storage *)p)->ss_family;
+    return socks5_mkcommand_plain(socks5_cmd_udp_associate, &sa);
 }
 
 static void socks5_fill_preamble(
