@@ -42,6 +42,10 @@ typedef enum httpc_state_t {
 
 #define HTTP_HEAD_WM_HIGH 8192  // that should be enough for one HTTP line.
 
+#define MAX_SERVER_NAME (253)    /* Max DNS is 253 characters */
+#define MAX_PORT_STR_LENGTH (6)  /* Ports are 5 digits decimax max */
+#define MAX_CONNECT_HOST_LENGTH (MAX_SERVER_NAME + MAX_PORT_STR_LENGTH + 1) /* Add one byte for \0 */
+
 
 static void httpc_client_init(redsocks_client *client)
 {
@@ -174,6 +178,14 @@ struct evbuffer *httpc_mkconnect(redsocks_client *client)
 {
 	struct evbuffer *buff = NULL, *retval = NULL;
 	int len;
+    char *hostname = NULL;
+
+
+    if (client->hostname) {
+        hostname = client->hostname;
+    } else {
+        hostname = inet_ntoa(client->destaddr.sin_addr);
+    }
 
 	buff = evbuffer_new();
 	if (!buff) {
@@ -188,8 +200,8 @@ struct evbuffer *httpc_mkconnect(redsocks_client *client)
 	char *auth_string = NULL;
 
 	/* calculate uri */
-	char uri[RED_INET_ADDRSTRLEN];
-	red_inet_ntop(&client->destaddr, uri, sizeof(uri));
+	char uri[MAX_CONNECT_HOST_LENGTH] = {0};
+	snprintf(uri, MAX_CONNECT_HOST_LENGTH, "%s:%u", hostname, ntohs(client->destaddr.sin_port));
 
 	if (auth->last_auth_query != NULL) {
 		/* find previous auth challange */
