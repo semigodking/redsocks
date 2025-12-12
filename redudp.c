@@ -164,7 +164,17 @@ static int bound_udp_get(const struct sockaddr *addr)
         goto fail;
     }
 
-    if (0 != bind(node->fd, (struct sockaddr*)addr, sizeof(*addr))) {
+    socklen_t bindaddr_len;
+#ifdef SOL_IPV6
+    if (addr->sa_family == AF_INET) {
+#endif
+        bindaddr_len = sizeof(struct sockaddr_in);
+#ifdef SOL_IPV6
+    } else {
+        bindaddr_len = sizeof(struct sockaddr_in6);
+    }
+#endif
+    if (0 != bind(node->fd, (struct sockaddr*)addr, bindaddr_len)) {
         log_errno(LOG_ERR, "bind");
         goto fail;
     }
