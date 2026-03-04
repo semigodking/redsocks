@@ -29,7 +29,9 @@ HOW TO BUILD
 The following libraries are required.
 
 * libevent2
-* OpenSSL or PolarSSL
+* OpenSSL >= 1.1.1 or mbedTLS >= 2.16
+
+Note: PolarSSL is no longer supported. Use mbedTLS instead.
 
 ### Steps
 On general Linux, simply run command below to build with OpenSSL.
@@ -38,10 +40,10 @@ On general Linux, simply run command below to build with OpenSSL.
 $ make
 ```
 
-To compile with PolarSSL
+To compile with mbedTLS
 
 ```
-$ make USE_CRYPTO_POLARSSL=true
+$ make USE_CRYPTO_MBEDTLS=true
 ```
 
 To compile static binaries (with Tomatoware)
@@ -56,7 +58,7 @@ compile like (Require libevent2 compiled with OpenSSL support):
 $ make ENABLE_HTTPS_PROXY=true
 ```
 
-To compile on newer systems with OpenSSL 1.1.1+ (just disable shadowsocks support, no patch need and worked with `ENABLE_HTTPS_PROXY`.):
+To compile without shadowsocks support:
 ```
 $ make DISABLE_SHADOWSOCKS=true
 ```
@@ -143,7 +145,7 @@ by field 'login'.
 	}
 
 
-List of supported encryption methods(Compiled with OpenSSL):
+List of supported encryption methods(Compiled with OpenSSL >= 1.1.1):
 
 	table
 	rc4
@@ -160,8 +162,12 @@ List of supported encryption methods(Compiled with OpenSSL):
 	idea-cfb
 	rc2-cfb
 	seed-cfb
+	aes-128-gcm
+	aes-192-gcm
+	aes-256-gcm
+	chacha20-ietf-poly1305
 
-List of supported encryption methods(Compiled with PolarSSL):
+List of supported encryption methods(Compiled with mbedTLS >= 2.16):
 
 	table
 	ARC4-128
@@ -172,6 +178,13 @@ List of supported encryption methods(Compiled with PolarSSL):
 	CAMELLIA-128-CFB128
 	CAMELLIA-192-CFB128
 	CAMELLIA-256-CFB128
+	AES-128-GCM
+	AES-192-GCM
+	AES-256-GCM
+	CHACHA20-POLY1305
+
+> Note:
+> chacha20-ietf-poly1305 requires OpenSSL >= 1.1.0 or mbedTLS >= 2.16 with ChachaPoly support.
 
 ### Redirect UDP based DNS Request via TCP connection
 Sending DNS request via TCP connection is one way to prevent from DNS

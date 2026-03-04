@@ -322,7 +322,7 @@ static int ss_connect_relay(redsocks_client *client)
     struct timeval tv;
     size_t len = 0;
     size_t header_len = 0;
-    char buff[64+sizeof(header)];
+    char buff[128+sizeof(header)];
 
     if (enc_ctx_init(&ss->info, &sclient->e_ctx, 1)) {
         log_error(LOG_ERR, "Shadowsocks failed to initialize encryption context.");

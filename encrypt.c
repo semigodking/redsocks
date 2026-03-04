@@ -58,9 +58,173 @@
 
 #endif
 
-// #include <sodium.h>
-
 #include "encrypt.h"
+
+#define AEAD_TAG_LEN    16
+#define AEAD_NONCE_LEN  12
+#define AEAD_CHUNK_MAX  0x3FFF  /* SIP004: payload length capped at 16383 */
+
+/* HKDF-SHA1: RFC 5869. info = "ss-subkey" per SIP004 */
+static int hkdf_sha1(const uint8_t *key, int key_len,
+                     const uint8_t *salt, int salt_len,
+                     uint8_t *out, int out_len)
+{
+    const char *info = "ss-subkey";
+    int info_len = 9;
+#if defined(USE_CRYPTO_OPENSSL)
+    uint8_t prk[20];
+    unsigned int prk_len = sizeof(prk);
+    if (!HMAC(EVP_sha1(), salt, salt_len, key, key_len, prk, &prk_len))
+        return -1;
+    /* HKDF-Expand: T(i) = HMAC-SHA1(PRK, T(i-1) || info || i) */
+    uint8_t t[20], buf[20 + 9 + 1];
+    unsigned int t_len = 0;
+    int done = 0;
+    for (uint8_t i = 1; done < out_len; i++) {
+        int blen = t_len + info_len + 1;
+        memcpy(buf, t, t_len);
+        memcpy(buf + t_len, info, info_len);
+        buf[t_len + info_len] = i;
+        t_len = sizeof(t);
+        if (!HMAC(EVP_sha1(), prk, prk_len, buf, blen, t, &t_len))
+            return -1;
+        int copy = min((int)t_len, out_len - done);
+        memcpy(out + done, t, copy);
+        done += copy;
+    }
+    return 0;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    uint8_t prk[20];
+    const mbedtls_md_info_t *sha1 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+    if (mbedtls_md_hmac(sha1, salt, salt_len, key, key_len, prk) != 0)
+        return -1;
+    uint8_t t[20], buf[20 + 9 + 1];
+    size_t t_len = 0;
+    int done = 0;
+    for (uint8_t i = 1; done < out_len; i++) {
+        int blen = (int)t_len + info_len + 1;
+        memcpy(buf, t, t_len);
+        memcpy(buf + t_len, info, info_len);
+        buf[t_len + info_len] = i;
+        if (mbedtls_md_hmac(sha1, prk, sizeof(prk), buf, blen, t) != 0)
+            return -1;
+        t_len = 20;
+        int copy = min((int)t_len, out_len - done);
+        memcpy(out + done, t, copy);
+        done += copy;
+    }
+    return 0;
+#endif
+}
+
+/* Build 12-byte little-endian nonce from counter */
+static void make_nonce(uint8_t nonce[AEAD_NONCE_LEN], uint64_t counter)
+{
+    memset(nonce, 0, AEAD_NONCE_LEN);
+    /* little-endian */
+    for (int i = 0; i < 8; i++)
+        nonce[i] = (counter >> (8 * i)) & 0xff;
+}
+
+/* Single AEAD encrypt: plaintext -> ciphertext + tag. Returns 1 on success. */
+static int aead_encrypt(const uint8_t *subkey, int key_len, int is_chacha,
+                        const uint8_t nonce[AEAD_NONCE_LEN],
+                        const uint8_t *plain, int plen,
+                        uint8_t *out)  /* out must hold plen + AEAD_TAG_LEN */
+{
+#if defined(USE_CRYPTO_OPENSSL)
+    const EVP_CIPHER *cipher = is_chacha ? EVP_chacha20_poly1305() :
+                               (key_len == 16) ? EVP_aes_128_gcm() :
+                               (key_len == 24) ? EVP_aes_192_gcm() :
+                                                 EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int ok = 0, clen = 0, flen = 0;
+    if (!ctx) return 0;
+    if (!EVP_EncryptInit_ex(ctx, cipher, NULL, subkey, nonce)) goto done;
+    if (!EVP_EncryptUpdate(ctx, out, &clen, plain, plen)) goto done;
+    if (!EVP_EncryptFinal_ex(ctx, out + clen, &flen)) goto done;
+    int ctrl = is_chacha ? EVP_CTRL_AEAD_GET_TAG : EVP_CTRL_GCM_GET_TAG;
+    if (!EVP_CIPHER_CTX_ctrl(ctx, ctrl, AEAD_TAG_LEN, out + clen + flen)) goto done;
+    ok = 1;
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    if (is_chacha) {
+        mbedtls_chachapoly_context ctx;
+        mbedtls_chachapoly_init(&ctx);
+        int ok = 0;
+        if (mbedtls_chachapoly_setkey(&ctx, subkey) != 0) goto done_cp_enc;
+        if (mbedtls_chachapoly_encrypt_and_tag(&ctx, plen, nonce,
+                                               NULL, 0, plain, out, out + plen) != 0) goto done_cp_enc;
+        ok = 1;
+done_cp_enc:
+        mbedtls_chachapoly_free(&ctx);
+        return ok;
+    }
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    int ok = 0;
+    if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, subkey, key_len * 8) != 0) goto done_enc;
+    if (mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plen,
+                                   nonce, AEAD_NONCE_LEN, NULL, 0,
+                                   plain, out, AEAD_TAG_LEN, out + plen) != 0) goto done_enc;
+    ok = 1;
+done_enc:
+    mbedtls_gcm_free(&gcm);
+    return ok;
+#endif
+}
+
+/* Single AEAD decrypt: ciphertext + tag -> plaintext. Returns 1 on success. */
+static int aead_decrypt(const uint8_t *subkey, int key_len, int is_chacha,
+                        const uint8_t nonce[AEAD_NONCE_LEN],
+                        const uint8_t *in, int clen, /* clen excludes tag */
+                        const uint8_t *tag,
+                        uint8_t *out)
+{
+#if defined(USE_CRYPTO_OPENSSL)
+    const EVP_CIPHER *cipher = is_chacha ? EVP_chacha20_poly1305() :
+                               (key_len == 16) ? EVP_aes_128_gcm() :
+                               (key_len == 24) ? EVP_aes_192_gcm() :
+                                                 EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int ok = 0, plen = 0, flen = 0;
+    if (!ctx) return 0;
+    if (!EVP_DecryptInit_ex(ctx, cipher, NULL, subkey, nonce)) goto done;
+    int ctrl = is_chacha ? EVP_CTRL_AEAD_SET_TAG : EVP_CTRL_GCM_SET_TAG;
+    if (!EVP_CIPHER_CTX_ctrl(ctx, ctrl, AEAD_TAG_LEN, (void *)tag)) goto done;
+    if (!EVP_DecryptUpdate(ctx, out, &plen, in, clen)) goto done;
+    if (!EVP_DecryptFinal_ex(ctx, out + plen, &flen)) goto done;
+    ok = 1;
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    return ok;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    if (is_chacha) {
+        mbedtls_chachapoly_context ctx;
+        mbedtls_chachapoly_init(&ctx);
+        int ok = 0;
+        if (mbedtls_chachapoly_setkey(&ctx, subkey) != 0) goto done_cp_dec;
+        if (mbedtls_chachapoly_auth_decrypt(&ctx, clen, nonce,
+                                            NULL, 0, tag, in, out) != 0) goto done_cp_dec;
+        ok = 1;
+done_cp_dec:
+        mbedtls_chachapoly_free(&ctx);
+        return ok;
+    }
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    int ok = 0;
+    if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, subkey, key_len * 8) != 0) goto done_dec;
+    if (mbedtls_gcm_auth_decrypt(&gcm, clen, nonce, AEAD_NONCE_LEN,
+                                  NULL, 0, tag, AEAD_TAG_LEN, in, out) != 0) goto done_dec;
+    ok = 1;
+done_dec:
+    mbedtls_gcm_free(&gcm);
+    return ok;
+#endif
+}
 
 #define OFFSET_ROL(p, o) ((uint64_t)(*(p + o)) << (8 * o))
 
@@ -96,8 +260,7 @@ static const char * supported_ciphers[] =
     "aes-128-gcm",
     "aes-192-gcm",
     "aes-256-gcm",
-//    "salsa20",
-//    "chacha20"
+    "chacha20-ietf-poly1305",
 };
 
 #ifdef USE_CRYPTO_MBEDTLS
@@ -121,70 +284,17 @@ static const char * supported_ciphers_mbedtls[] =
     "AES-128-GCM",
     "AES-192-GCM",
     "AES-256-GCM",
-//    "salsa20",
-//    "chacha20"
+    "CHACHA20-POLY1305",
 };
 #endif
-
-#ifdef USE_CRYPTO_APPLECC
-static const CCAlgorithm supported_ciphers_applecc[] =
-{
-    kCCAlgorithmInvalid,
-    kCCAlgorithmRC4,
-    kCCAlgorithmRC4,
-    kCCAlgorithmAES,
-    kCCAlgorithmAES,
-    kCCAlgorithmAES,
-    kCCAlgorithmBlowfish,
-    kCCAlgorithmInvalid,
-    kCCAlgorithmInvalid,
-    kCCAlgorithmInvalid,
-    kCCAlgorithmCAST,
-    kCCAlgorithmDES,
-    kCCAlgorithmInvalid,
-    kCCAlgorithmRC2,
-    kCCAlgorithmInvalid,
-    kCCAlgorithmAES,
-    kCCAlgorithmAES,
-    kCCAlgorithmAES,
-//    kCCAlgorithmInvalid,
-//    kCCAlgorithmInvalid
-};
-
-#endif
-
-static const int supported_ciphers_iv_size[] =
-{
-    0, 0, 16, 16, 16, 16, 8, 16, 16, 16, 8, 8, 8, 8, 16, 12, 12, 12
-};
-
-static const int supported_ciphers_key_size[] =
-{
-    0, 16, 16, 16, 24, 32, 16, 16, 24, 32, 16, 8, 16, 16, 16, 16, 24, 32
-};
 
 #define CIPHER_NUM (sizeof(supported_ciphers)/sizeof(supported_ciphers[0]))
 
 /* Check if the method uses GCM mode (AEAD cipher) */
-static int is_gcm_mode(int method)
+static int is_aead_mode(int method)
 {
-    return (method == AES_128_GCM || method == AES_192_GCM || method == AES_256_GCM);
-}
-
-static int __attribute__((unused)) crypto_stream_xor_ic(uint8_t *c, const uint8_t *m, uint64_t mlen,
-                                const uint8_t *n, uint64_t ic, const uint8_t *k,
-                                int method)
-{
-/*
-    switch (method) {
-    case SALSA20:
-        return crypto_stream_salsa20_xor_ic(c, m, mlen, n, ic, k);
-    case CHACHA20:
-        return crypto_stream_chacha20_xor_ic(c, m, mlen, n, ic, k);
-    }
-*/    
-    // always return 0
-    return 0;
+    return (method == AES_128_GCM || method == AES_192_GCM || method == AES_256_GCM
+            || method == CHACHA20_IETF_POLY1305);
 }
 
 static int random_compare(const void *_x, const void *_y, uint32_t i,
@@ -200,6 +310,12 @@ static void merge(uint8_t *left, int llength, uint8_t *right,
 {
     uint8_t *ltmp = (uint8_t *)malloc(llength * sizeof(uint8_t));
     uint8_t *rtmp = (uint8_t *)malloc(rlength * sizeof(uint8_t));
+
+    if (!ltmp || !rtmp) {
+        free(ltmp);
+        free(rtmp);
+        return;
+    }
 
     uint8_t *ll = ltmp;
     uint8_t *rr = rtmp;
@@ -316,10 +432,17 @@ int cipher_iv_size(const cipher_kt_t *cipher)
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_CIPHER_iv_length(cipher);
 #elif defined(USE_CRYPTO_MBEDTLS)
-    if (cipher == NULL) {
+    if (cipher == NULL)
+        return 0;
+    mbedtls_cipher_context_t ctx;
+    mbedtls_cipher_init(&ctx);
+    if (mbedtls_cipher_setup(&ctx, cipher) != 0) {
+        mbedtls_cipher_free(&ctx);
         return 0;
     }
-    return mbedtls_cipher_info_get_iv_size(cipher);
+    int iv_size = mbedtls_cipher_get_iv_size(&ctx);
+    mbedtls_cipher_free(&ctx);
+    return iv_size;
 #endif
 }
 
@@ -328,10 +451,17 @@ int cipher_key_size(const cipher_kt_t *cipher)
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_CIPHER_key_length(cipher);
 #elif defined(USE_CRYPTO_MBEDTLS)
-    if (cipher == NULL) {
+    if (cipher == NULL)
+        return 0;
+    mbedtls_cipher_context_t ctx;
+    mbedtls_cipher_init(&ctx);
+    if (mbedtls_cipher_setup(&ctx, cipher) != 0) {
+        mbedtls_cipher_free(&ctx);
         return 0;
     }
-    return mbedtls_cipher_info_get_key_size(cipher);
+    int key_bits = mbedtls_cipher_get_key_bitlen(&ctx);
+    mbedtls_cipher_free(&ctx);
+    return key_bits / 8;
 #endif
 }
 
@@ -483,8 +613,9 @@ int rand_bytes(uint8_t *output, int len)
         mbedtls_entropy_init(&ec);
         if (mbedtls_ctr_drbg_seed(&cd_ctx, mbedtls_entropy_func, &ec,
                           (const unsigned char *)rand_buffer.buffer, 8) != 0) {
+            mbedtls_ctr_drbg_free(&cd_ctx);
             mbedtls_entropy_free(&ec);
-            //FATAL("Failed to initialize random generator");
+            return 0;
         }
         rand_initialised = 1;
     }
@@ -509,12 +640,9 @@ const cipher_kt_t *get_cipher_type(int method)
     if (method == RC4_MD5) {
         method = RC4;
     }
-/*
-    if (method >= SALSA20) {
-        return NULL;
-    }
-*/
 #if defined(USE_CRYPTO_OPENSSL)
+    if (method == CHACHA20_IETF_POLY1305)
+        return EVP_get_cipherbyname("chacha20-poly1305");
     const char *ciphername = supported_ciphers[method];
     return EVP_get_cipherbyname(ciphername);
 #elif defined(USE_CRYPTO_MBEDTLS)
@@ -549,31 +677,6 @@ static int cipher_context_init(const enc_info * info, cipher_ctx_t *ctx, int enc
         // Illegal method
         return -1;
     }
-/*
-    if (method >= SALSA20) {
-        enc_iv_len = supported_ciphers_iv_size[method];
-        return;
-    }
-*/
-#if defined(USE_CRYPTO_APPLECC)
-    cipher_cc_t *cc = &ctx->cc;
-    cc->cryptor = NULL;
-    cc->cipher = supported_ciphers_applecc[method];
-    if (cc->cipher == kCCAlgorithmInvalid) {
-        cc->valid = kCCContextInvalid;
-    } else {
-        cc->valid = kCCContextValid;
-        if (cc->cipher == kCCAlgorithmRC4) {
-            cc->mode = kCCModeRC4;
-            cc->padding = ccNoPadding;
-        } else {
-            cc->mode = kCCModeCFB;
-            cc->padding = ccPKCS7Padding;
-        }
-        return 0;
-    }
-#endif
-
 #if defined(USE_CRYPTO_OPENSSL)
     cipher_evp_t evp = EVP_CIPHER_CTX_new_compat();
     if (evp == NULL) {
@@ -603,7 +706,7 @@ static int cipher_context_init(const enc_info * info, cipher_ctx_t *ctx, int enc
         // Invalid key length
         return -1;
     }
-    if (is_gcm_mode(method)) {
+    if (is_aead_mode(method)) {
         /* GCM mode - disable padding and set tag length */
         EVP_CIPHER_CTX_set_padding(evp, 0);
         /* Tag length will be set after initialization */
@@ -619,12 +722,8 @@ static int cipher_context_init(const enc_info * info, cipher_ctx_t *ctx, int enc
     }
     mbedtls_cipher_init(evp);
     if (mbedtls_cipher_setup(evp, cipher) != 0) {
-        // Cannot initialize mbedTLS cipher context
+        mbedtls_cipher_free(evp);
         return -1;
-    }
-    if (is_gcm_mode(method)) {
-        /* GCM mode in mbedTLS - set operation mode */
-        /* The tag length is handled automatically by mbedTLS */
     }
 #endif
     return 0;
@@ -643,12 +742,6 @@ static void cipher_context_set_iv(const enc_info * info, cipher_ctx_t *ctx, uint
     if (enc) {
         rand_bytes(iv, iv_len);
     }
-/*
-    if (enc_method >= SALSA20) {
-        memcpy(ctx->iv, iv, iv_len);
-        return;
-    }
-*/
     if (info->method == RC4_MD5) {
         unsigned char key_iv[32];
         memcpy(key_iv, info->key, 16);
@@ -658,39 +751,6 @@ static void cipher_context_set_iv(const enc_info * info, cipher_ctx_t *ctx, uint
     } else {
         true_key = info->key;
     }
-
-#ifdef USE_CRYPTO_APPLECC
-    cipher_cc_t *cc = &ctx->cc;
-    if (cc->valid == kCCContextValid) {
-        memcpy(cc->iv, iv, iv_len);
-        memcpy(cc->key, true_key, info->key_len);
-        cc->iv_len = iv_len;
-        cc->key_len = info->key_len;
-        cc->encrypt = enc ? kCCEncrypt : kCCDecrypt;
-        if (cc->cryptor != NULL) {
-            CCCryptorRelease(cc->cryptor);
-            cc->cryptor = NULL;
-        }
-
-        CCCryptorStatus ret;
-        ret = CCCryptorCreateWithMode(
-            cc->encrypt,
-            cc->mode,
-            cc->cipher,
-            cc->padding,
-            cc->iv, cc->key, cc->key_len,
-            NULL, 0, 0, 0,
-            &cc->cryptor);
-        if (ret != kCCSuccess) {
-            if (cc->cryptor != NULL) {
-                CCCryptorRelease(cc->cryptor);
-                cc->cryptor = NULL;
-            }
-            //FATAL("Cannot set CommonCrypto key and IV");
-        }
-        return;
-    }
-#endif
 
 #if defined(USE_CRYPTO_OPENSSL)
     cipher_evp_t evp = ctx->evp;
@@ -726,21 +786,6 @@ static void cipher_context_set_iv(const enc_info * info, cipher_ctx_t *ctx, uint
 
 static void cipher_context_release(enc_info * info, cipher_ctx_t *ctx)
 {
-    if (info->method >= SALSA20) {
-        return;
-    }
-
-#ifdef USE_CRYPTO_APPLECC
-    cipher_cc_t *cc = &ctx->cc;
-    if (cc->cryptor != NULL) {
-        CCCryptorRelease(cc->cryptor);
-        cc->cryptor = NULL;
-    }
-    if (cc->valid == kCCContextValid) {
-        return;
-    }
-#endif
-
 #if defined(USE_CRYPTO_OPENSSL)
     cipher_evp_t evp = ctx->evp;
     if (evp != NULL) {
@@ -757,15 +802,6 @@ static void cipher_context_release(enc_info * info, cipher_ctx_t *ctx)
 static int cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, int *olen,
                                  const uint8_t *input, int ilen)
 {
-#ifdef USE_CRYPTO_APPLECC
-    cipher_cc_t *cc = &ctx->cc;
-    if (cc->valid == kCCContextValid) {
-        CCCryptorStatus ret;
-        ret = CCCryptorUpdate(cc->cryptor, input, ilen, output,
-                              ilen, (size_t *)olen);
-        return (ret == kCCSuccess) ? 1 : 0;
-    }
-#endif
 #if defined(USE_CRYPTO_OPENSSL)
     EVP_CIPHER_CTX *evp = ctx->evp;
     return EVP_CipherUpdate(evp, (uint8_t *)output, olen,
@@ -783,47 +819,101 @@ static int cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, int *olen,
 size_t ss_calc_buffer_size(struct enc_ctx * ctx, size_t ilen)
 {
     int method = ctx->info->method;
-    const cipher_kt_t *cipher = get_cipher_type(method);
+    if (is_aead_mode(method)) {
+        /*
+         * SIP004 TCP format:
+         *   first call: [salt] + N * ([2+TAG] + [payload+TAG])
+         *   subsequent: N * ([2+TAG] + [payload+TAG])
+         * Worst case: each byte could be its own chunk.
+         * In practice ilen <= AEAD_CHUNK_MAX, so one chunk:
+         *   (2 + AEAD_TAG_LEN) + (ilen + AEAD_TAG_LEN)
+         */
+        size_t salt_len = ctx->init ? 0 : ctx->info->key_len;
+        size_t chunks = (ilen + AEAD_CHUNK_MAX - 1) / AEAD_CHUNK_MAX;
+        if (chunks == 0) chunks = 1;
+        return salt_len + chunks * (2 + AEAD_TAG_LEN + AEAD_CHUNK_MAX + AEAD_TAG_LEN);
+    }
 #if defined(USE_CRYPTO_OPENSSL)
-    if (is_gcm_mode(method)) {
-        /* GCM mode needs extra 16 bytes for the authentication tag */
-        if (ctx->init)
-            return ilen + 16;
-        else
-            return EVP_CIPHER_iv_length(cipher) + ilen + 16;
-    } else {
-        if (ctx->init)
-            return ilen + EVP_CIPHER_block_size(cipher);
-        else
-            return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher);
-    }
-#elif defined(USE_CRYPTO_MBEDTLS)
-    if (cipher == NULL) {
+    const cipher_kt_t *cipher = get_cipher_type(method);
+    if (cipher == NULL)
         return ilen;
-    }
-    if (is_gcm_mode(method)) {
-        /* GCM mode needs extra 16 bytes for the authentication tag */
-        if (ctx->init)
-            return ilen + 16;
-        else
-            return mbedtls_cipher_info_get_iv_size(cipher) + ilen + 16;
-    } else {
-        if (ctx->init)
-            return ilen + mbedtls_cipher_get_block_size(&ctx->evp);
-        else
-            return mbedtls_cipher_info_get_iv_size(cipher) + ilen + mbedtls_cipher_get_block_size(&ctx->evp);
-    }
+    if (ctx->init)
+        return ilen + EVP_CIPHER_block_size(cipher);
+    else
+        return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher);
+#elif defined(USE_CRYPTO_MBEDTLS)
+    const cipher_kt_t *cipher = get_cipher_type(method);
+    if (cipher == NULL)
+        return ilen;
+    if (ctx->init)
+        return ilen + mbedtls_cipher_get_block_size(&ctx->evp.evp);
+    else
+        return mbedtls_cipher_get_iv_size(&ctx->evp.evp) + ilen + mbedtls_cipher_get_block_size(&ctx->evp.evp);
 #endif
 }
 
 int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
                   char * ciphertext, size_t * clen)
 {
-    if (ctx != NULL) {
+    if (ctx != NULL && ctx->info->method != TABLE) {
+        if (is_aead_mode(ctx->info->method)) {
+            /*
+             * SIP004 TCP AEAD encrypt:
+             *   First call: prepend salt, derive subkey via HKDF-SHA1
+             *   Each chunk: [enc(2-byte-len) + TAG] [enc(payload) + TAG]
+             *   Nonce: 12-byte little-endian counter, incremented per AE op
+             */
+            uint8_t *out = (uint8_t *)ciphertext;
+            size_t out_len = 0;
+            int key_len = ctx->info->key_len;
+            int is_chacha = (ctx->info->method == CHACHA20_IETF_POLY1305);
+
+            if (!ctx->init) {
+                /* Generate salt and derive subkey */
+                rand_bytes(out, key_len);
+                if (hkdf_sha1(ctx->info->key, key_len, out, key_len,
+                              ctx->subkey, key_len) != 0)
+                    return 0;
+                out += key_len;
+                out_len += key_len;
+                ctx->counter = 0;
+                ctx->init = 1;
+            }
+
+            const uint8_t *src = (const uint8_t *)plaintext;
+            size_t remaining = plen;
+            uint8_t nonce[AEAD_NONCE_LEN];
+
+            while (remaining > 0) {
+                uint16_t chunk = (uint16_t)min(remaining, (size_t)AEAD_CHUNK_MAX);
+
+                /* Encrypt 2-byte length */
+                uint8_t len_buf[2] = { (chunk >> 8) & 0xff, chunk & 0xff };
+                make_nonce(nonce, ctx->counter++);
+                if (!aead_encrypt(ctx->subkey, key_len, is_chacha, nonce,
+                                    len_buf, 2, out))
+                    return 0;
+                out += 2 + AEAD_TAG_LEN;
+                out_len += 2 + AEAD_TAG_LEN;
+
+                /* Encrypt payload */
+                make_nonce(nonce, ctx->counter++);
+                if (!aead_encrypt(ctx->subkey, key_len, is_chacha, nonce,
+                                    src, chunk, out))
+                    return 0;
+                out += chunk + AEAD_TAG_LEN;
+                out_len += chunk + AEAD_TAG_LEN;
+
+                src += chunk;
+                remaining -= chunk;
+            }
+            *clen = out_len;
+            return 1;
+        }
+
         int err = 1;
         int iv_len = 0;
         int p_len = plen, c_len = plen;
-        int tag_len = 0;
         if (!ctx->init) {
             iv_len = ctx->info->iv_len;
         }
@@ -836,75 +926,17 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
             ctx->init = 1;
         }
 
-        /* For GCM mode, we need to handle the authentication tag */
-        if (is_gcm_mode(ctx->info->method)) {
-            tag_len = 16; /* GCM standard tag length */
-            c_len = p_len + tag_len; /* Output includes tag */
-        }
-
-        if (ctx->info->method >= SALSA20) {
-/*        
-            int padding = ctx->counter % SODIUM_BLOCK_SIZE;
-            if (buf_len < iv_len + padding + c_len) {
-                buf_len = max(iv_len + (padding + c_len) * 2, buf_size);
-                ciphertext = realloc(ciphertext, buf_len);
-                tmp_len = buf_len;
-                tmp_buf = ciphertext;
-            }
-            if (padding) {
-                plaintext = realloc(plaintext, max(p_len + padding, buf_size));
-                memmove(plaintext + padding, plaintext, p_len);
-                memset(plaintext, 0, padding);
-            }
-            crypto_stream_xor_ic((uint8_t *)(ciphertext + iv_len),
-                                 (const uint8_t *)plaintext,
-                                 (uint64_t)(p_len + padding),
-                                 (const uint8_t *)ctx->evp.iv,
-                                 ctx->counter / SODIUM_BLOCK_SIZE, enc_key,
-                                 enc_method);
-            ctx->counter += p_len;
-            if (padding) {
-                memmove(ciphertext + iv_len, ciphertext + iv_len + padding,
-                        c_len);
-            }
-*/            
-        } else {
-            err =
-                cipher_context_update(&ctx->evp,
-                                      (uint8_t *)(ciphertext + iv_len),
-                                      &c_len, (const uint8_t *)plaintext,
-                                      p_len);
-            if (!err) {
-                return 0;
-            }
-
-            /* For GCM mode, get and append the authentication tag */
-            if (is_gcm_mode(ctx->info->method)) {
-#if defined(USE_CRYPTO_OPENSSL)
-                /* Get the tag from GCM mode */
-                if (!EVP_CIPHER_CTX_ctrl(*(EVP_CIPHER_CTX **)&ctx->evp, EVP_CTRL_GCM_GET_TAG, 16,
-                                       ciphertext + iv_len + p_len)) {
-                    // Failed to get tag
-                    return 0;
-                }
-                c_len = p_len + 16; /* Total output = ciphertext + tag */
-#elif defined(USE_CRYPTO_MBEDTLS)
-                /* Get the tag from GCM mode */
-                if (mbedtls_cipher_write_tag(&ctx->evp,
-                        (unsigned char *)(ciphertext + iv_len + p_len), 16) != 0) {
-                    // Failed to get tag
-                    return 0;
-                }
-                c_len = p_len + 16; /* Total output = ciphertext + tag */
-#endif
-            }
-        }
+        err = cipher_context_update(&ctx->evp,
+                                    (uint8_t *)(ciphertext + iv_len),
+                                    &c_len, (const uint8_t *)plaintext,
+                                    p_len);
+        if (!err)
+            return 0;
 
 #ifdef DEBUG
         dump("PLAIN", plaintext, p_len);
         dump("CIPHER", ciphertext + iv_len, c_len);
 #endif
-
         *clen = iv_len + c_len;
         return 1;
     } else {
@@ -923,97 +955,92 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
 int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
                  char *plaintext, size_t *olen)
 {
-    if (ctx != NULL) {
+    if (ctx != NULL && ctx->info->method != TABLE) {
+        if (is_aead_mode(ctx->info->method)) {
+            /*
+             * SIP004 TCP AEAD decrypt:
+             *   First call: read salt, derive subkey via HKDF-SHA1
+             *   Each chunk: decrypt [enc(2-byte-len)+TAG] then [enc(payload)+TAG]
+             */
+            const uint8_t *in = (const uint8_t *)ciphertext;
+            size_t in_remaining = clen;
+            uint8_t *out = (uint8_t *)plaintext;
+            size_t out_len = 0;
+            int key_len = ctx->info->key_len;
+            int is_chacha = (ctx->info->method == CHACHA20_IETF_POLY1305);
+            uint8_t nonce[AEAD_NONCE_LEN];
+
+            if (!ctx->init) {
+                if (in_remaining < (size_t)key_len)
+                    return 0;
+                if (hkdf_sha1(ctx->info->key, key_len, in, key_len,
+                              ctx->subkey, key_len) != 0)
+                    return 0;
+                in += key_len;
+                in_remaining -= key_len;
+                ctx->counter = 0;
+                ctx->init = 1;
+            }
+
+            while (in_remaining > 0) {
+                /* Need at least encrypted length field */
+                if (in_remaining < 2 + AEAD_TAG_LEN)
+                    break;
+
+                /* Decrypt length */
+                uint8_t len_plain[2];
+                make_nonce(nonce, ctx->counter);
+                if (!aead_decrypt(ctx->subkey, key_len, is_chacha, nonce,
+                                    in, 2, in + 2, len_plain))
+                    return 0;
+                ctx->counter++;
+
+                uint16_t chunk = ((uint16_t)len_plain[0] << 8) | len_plain[1];
+                if (chunk > AEAD_CHUNK_MAX)
+                    return 0;
+
+                in += 2 + AEAD_TAG_LEN;
+                in_remaining -= 2 + AEAD_TAG_LEN;
+
+                /* Need full encrypted payload */
+                if (in_remaining < (size_t)(chunk + AEAD_TAG_LEN))
+                    break;
+
+                /* Decrypt payload */
+                make_nonce(nonce, ctx->counter);
+                if (!aead_decrypt(ctx->subkey, key_len, is_chacha, nonce,
+                                    in, chunk, in + chunk, out))
+                    return 0;
+                ctx->counter++;
+
+                out += chunk;
+                out_len += chunk;
+                in += chunk + AEAD_TAG_LEN;
+                in_remaining -= chunk + AEAD_TAG_LEN;
+            }
+            *olen = out_len;
+            return 1;
+        }
+
         int p_len = clen;
         int iv_len = 0;
         int err = 1;
-        int tag_len = 0;
 
         if (!ctx->init) {
             iv_len = ctx->info->iv_len;
-            /* For GCM mode, we need to account for the tag in ciphertext */
-            if (is_gcm_mode(ctx->info->method)) {
-                tag_len = 16; /* GCM standard tag length */
-            }
-            p_len -= iv_len + tag_len;
+            p_len -= iv_len;
             cipher_context_set_iv(ctx->info, &ctx->evp, (uint8_t *)ciphertext, iv_len, 0);
             ctx->counter = 0;
             ctx->init = 1;
-        } else {
-            /* Already initialized - need to account for tag if GCM mode */
-            if (is_gcm_mode(ctx->info->method)) {
-                tag_len = 16;
-            }
         }
 
-        if (ctx->info->method >= SALSA20) {
-/*        
-            int padding = ctx->counter % SODIUM_BLOCK_SIZE;
-            if (buf_len < (p_len + padding) * 2) {
-                buf_len = max((p_len + padding) * 2, buf_size);
-                plaintext = realloc(plaintext, buf_len);
-                tmp_len = buf_len;
-                tmp_buf = plaintext;
-            }
-            if (padding) {
-                ciphertext =
-                    realloc(ciphertext, max(c_len + padding, buf_size));
-                memmove(ciphertext + iv_len + padding, ciphertext + iv_len,
-                        c_len - iv_len);
-                memset(ciphertext + iv_len, 0, padding);
-            }
-            crypto_stream_xor_ic((uint8_t *)plaintext,
-                                 (const uint8_t *)(ciphertext + iv_len),
-                                 (uint64_t)(c_len - iv_len + padding),
-                                 (const uint8_t *)ctx->evp.iv,
-                                 ctx->counter / SODIUM_BLOCK_SIZE, enc_key,
-                                 enc_method);
-            ctx->counter += c_len - iv_len;
-            if (padding) {
-                memmove(plaintext, plaintext + padding, p_len);
-            }
-*/
-        } else {
-            err = cipher_context_update(&ctx->evp, (uint8_t *)plaintext, &p_len,
-                                        (const uint8_t *)(ciphertext + iv_len),
-                                        clen - iv_len - tag_len);
-            if (!err) {
-                return 0;
-            }
-
-            /* For GCM mode, verify the authentication tag */
-            if (is_gcm_mode(ctx->info->method)) {
-#if defined(USE_CRYPTO_OPENSSL)
-                /* Set the expected tag from ciphertext */
-                if (!EVP_CIPHER_CTX_ctrl(*(EVP_CIPHER_CTX **)&ctx->evp, EVP_CTRL_GCM_SET_TAG, 16,
-                                       ciphertext + clen - tag_len)) {
-                    // Failed to set tag for verification
-                    return 0;
-                }
-                /* Note: In GCM mode, EVP_CipherFinal will verify the tag */
-                int final_len = 0;
-                if (!EVP_CipherFinal_ex(*(EVP_CIPHER_CTX **)&ctx->evp, (unsigned char *)(plaintext + p_len), &final_len)) {
-                    // Tag verification failed
-                    return 0;
-                }
-#elif defined(USE_CRYPTO_MBEDTLS)
-                /* Set the expected tag from ciphertext for verification */
-                if (mbedtls_cipher_check_tag(&ctx->evp,
-                        (const unsigned char *)(ciphertext + clen - tag_len), 16) != 0) {
-                    // Tag verification failed
-                    return 0;
-                }
-#endif
-            }
-        }
-
-        if (!err) {
-//            free(ciphertext);
+        err = cipher_context_update(&ctx->evp, (uint8_t *)plaintext, &p_len,
+                                    (const uint8_t *)(ciphertext + iv_len),
+                                    clen - iv_len);
+        if (!err)
             return 0;
-        }
 
         *olen = p_len;
-
         return 1;
     } else {
         char *begin = ciphertext;
@@ -1031,12 +1058,15 @@ int enc_ctx_init(enc_info * info, struct enc_ctx *ctx, int enc)
 {
     memset(ctx, 0, sizeof(struct enc_ctx));
     ctx->info = info;
+    if (is_aead_mode(info->method))
+        return 0;  /* GCM uses per-operation contexts, no persistent ctx needed */
     return cipher_context_init(info, &ctx->evp, enc);
 }
 
 void enc_ctx_free(struct enc_ctx *ctx)
 {
-    cipher_context_release(ctx->info, &ctx->evp);
+    if (!is_aead_mode(ctx->info->method))
+        cipher_context_release(ctx->info, &ctx->evp);
 }
 
 static int enc_key_init(enc_info * info, int method, const char *pass)
@@ -1055,43 +1085,10 @@ static int enc_key_init(enc_info * info, int method, const char *pass)
 
     const cipher_kt_t *cipher = NULL;
 
-    if (method == SALSA20 || method == CHACHA20) {
-/*    
-        if (sodium_init() == -1) {
-            //FATAL("Failed to initialize sodium");
-        }
-        // Fake cipher
-        cipher = (cipher_kt_t *)&cipher_info;
-#if defined(USE_CRYPTO_OPENSSL)
-        cipher->key_len = supported_ciphers_key_size[method];
-        cipher->iv_len = supported_ciphers_iv_size[method];
-#endif
-#if defined(USE_CRYPTO_POLARSSL)
-        cipher->base = NULL;
-        cipher->key_length = supported_ciphers_key_size[method] * 8;
-        cipher->iv_size = supported_ciphers_iv_size[method];
-#endif
-*/
-    } else {
-        cipher = (cipher_kt_t *)get_cipher_type(method);
-    }
+    cipher = (cipher_kt_t *)get_cipher_type(method);
 
-    if (cipher == NULL) {
-        do {
-#if !defined(USE_CRYPTO_MBEDTLS) && defined(USE_CRYPTO_APPLECC)
-            /* Only apply AppleCC fallback for OpenSSL, not mbedTLS */
-            if (supported_ciphers_applecc[method] != kCCAlgorithmInvalid) {
-                mbedtls_cipher_info_t cipher_info;
-                cipher_info.base = NULL;
-                cipher_info.key_length = supported_ciphers_key_size[method] * 8;
-                cipher_info.iv_size = supported_ciphers_iv_size[method];
-                cipher = (const cipher_kt_t *)&cipher_info;
-                break;
-            }
-#endif
-            return -1;
-        } while (0);
-    }
+    if (cipher == NULL)
+        return -1;
 
     const digest_type_t *md = get_digest_type("MD5");
     if (md == NULL)

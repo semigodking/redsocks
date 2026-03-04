@@ -40,13 +40,6 @@ endif
 
 
 #LDFLAGS += -fwhole-program
-# Backward compatibility: support USE_CRYPTO_POLARSSL variable
-ifdef USE_CRYPTO_POLARSSL
-override LIBS += -lmbedtls -lmbedx509 -lmbedcrypto
-override CFLAGS += -DUSE_CRYPTO_MBEDTLS
-$(info Compile with mbedTLS (via USE_CRYPTO_POLARSSL).)
-CRYPTO := mbedTLS
-else
 ifdef USE_CRYPTO_MBEDTLS
 override LIBS += -lmbedtls -lmbedx509 -lmbedcrypto
 override CFLAGS += -DUSE_CRYPTO_MBEDTLS
@@ -68,9 +61,8 @@ override LIBS += -ldl
 endif
 override CFLAGS += -DUSE_CRYPTO_OPENSSL
 endif
-endif
 ifdef ENABLE_STATIC
-override LIBS += -lz
+override LIBS += $(shell nm -u $(shell $(CC) -print-file-name=libcrypto.a) 2>/dev/null | grep -q 'deflate\|inflate\|zlibVersion' && echo -lz)
 override LDFLAGS += -Wl,-static -static -static-libgcc -s
 override FEATURES += STATIC_COMPILE
 endif

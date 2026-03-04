@@ -45,6 +45,7 @@
 #if defined(USE_CRYPTO_OPENSSL)
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/md5.h>
 #include <openssl/rand.h>
 #include <openssl/opensslv.h>
@@ -59,6 +60,8 @@ typedef const EVP_MD digest_type_t;
 #elif defined(USE_CRYPTO_MBEDTLS)
 
 #include <mbedtls/cipher.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/chachapoly.h>
 #include <mbedtls/md5.h>
 #include <mbedtls/md.h>
 #include <mbedtls/entropy.h>
@@ -73,37 +76,11 @@ typedef mbedtls_md_info_t digest_type_t;
 
 #endif
 
-#ifdef USE_CRYPTO_APPLECC
-
-#include <CommonCrypto/CommonCrypto.h>
-
-#define kCCAlgorithmInvalid UINT32_MAX
-#define kCCContextValid 0
-#define kCCContextInvalid -1
-
-typedef struct {
-    CCCryptorRef cryptor;
-    int valid;
-    CCOperation encrypt;
-    CCAlgorithm cipher;
-    CCMode mode;
-    CCPadding padding;
-    uint8_t iv[MAX_IV_LENGTH];
-    uint8_t key[MAX_KEY_LENGTH];
-    size_t iv_len;
-    size_t key_len;
-} cipher_cc_t;
-
-#endif
-
 typedef struct {
 #if defined(USE_CRYPTO_OPENSSL)
     EVP_CIPHER_CTX *evp;
 #elif defined(USE_CRYPTO_MBEDTLS)
     mbedtls_cipher_context_t evp;
-#endif
-#ifdef USE_CRYPTO_APPLECC
-    cipher_cc_t cc;
 #endif
     uint8_t iv[MAX_IV_LENGTH];
 } cipher_ctx_t;
@@ -135,8 +112,7 @@ typedef struct {
 #define AES_128_GCM         15
 #define AES_192_GCM         16
 #define AES_256_GCM         17
-#define SALSA20             18
-#define CHACHA20            19
+#define CHACHA20_IETF_POLY1305 18
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
@@ -152,9 +128,10 @@ typedef struct enc_info_t {
 
 struct enc_ctx {
     uint8_t init;
-    uint64_t counter;
+    uint64_t counter;       /* nonce counter for AEAD, incremented per AE op */
     cipher_ctx_t evp;
     enc_info * info;
+    uint8_t subkey[MAX_KEY_LENGTH]; /* AEAD per-session subkey derived from salt */
 };
 
 int enc_init(enc_info * info, const char *pass, const char *method);
