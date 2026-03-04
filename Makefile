@@ -40,13 +40,20 @@ endif
 
 
 #LDFLAGS += -fwhole-program
+# Backward compatibility: support USE_CRYPTO_POLARSSL variable
 ifdef USE_CRYPTO_POLARSSL
-override LIBS += -lpolarssl
-override CFLAGS += -DUSE_CRYPTO_POLARSSL
-$(info Compile with PolarSSL.)
-CRYPTO := PolarSSL
+override LIBS += -lmbedtls -lmbedx509 -lmbedcrypto
+override CFLAGS += -DUSE_CRYPTO_MBEDTLS
+$(info Compile with mbedTLS (via USE_CRYPTO_POLARSSL).)
+CRYPTO := mbedTLS
 else
-$(info Compile with OpenSSL by default. To compile with PolarSSL, run 'make USE_CRYPTO_POLARSSL=true' instead.)
+ifdef USE_CRYPTO_MBEDTLS
+override LIBS += -lmbedtls -lmbedx509 -lmbedcrypto
+override CFLAGS += -DUSE_CRYPTO_MBEDTLS
+$(info Compile with mbedTLS.)
+CRYPTO := mbedTLS
+else
+$(info Compile with OpenSSL by default. To compile with mbedTLS, run 'make USE_CRYPTO_MBEDTLS=true' instead.)
 CRYPTO := OpenSSL
 ifdef ENABLE_HTTPS_PROXY
 override OBJS += https-connect.o
@@ -60,6 +67,7 @@ ifneq ($(OS), OpenBSD)
 override LIBS += -ldl
 endif
 override CFLAGS += -DUSE_CRYPTO_OPENSSL
+endif
 endif
 ifdef ENABLE_STATIC
 override LIBS += -lz

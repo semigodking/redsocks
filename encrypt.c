@@ -24,15 +24,28 @@
 
 #if defined(USE_CRYPTO_OPENSSL)
 
-#include <openssl/md5.h>
-#include <openssl/rand.h>
+/* OpenSSL 3.0+ compatibility */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/core_names.h>
+#include <openssl/params.h>
+#define EVP_CIPHER_CTX_new_compat() EVP_CIPHER_CTX_new()
+#define EVP_CIPHER_CTX_free_compat(ctx) EVP_CIPHER_CTX_free(ctx)
+#define EVP_CIPHER_CTX_init_compat(ctx)
+#define EVP_CIPHER_CTX_cleanup_compat(ctx)
+#else
+/* OpenSSL 1.1.x and earlier */
+#define EVP_CIPHER_CTX_new_compat() EVP_CIPHER_CTX_new()
+#define EVP_CIPHER_CTX_free_compat(ctx) EVP_CIPHER_CTX_free(ctx)
+#define EVP_CIPHER_CTX_init_compat(ctx) EVP_CIPHER_CTX_init(ctx)
+#define EVP_CIPHER_CTX_cleanup_compat(ctx) EVP_CIPHER_CTX_cleanup(ctx)
+#endif
 
-#elif defined(USE_CRYPTO_POLARSSL)
+#elif defined(USE_CRYPTO_MBEDTLS)
 
-#include <polarssl/md5.h>
-#include <polarssl/entropy.h>
-#include <polarssl/ctr_drbg.h>
-#include <polarssl/version.h>
+#include <mbedtls/md5.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/version.h>
 #define CIPHER_UNSUPPORTED "unsupported"
 
 #include <time.h>
@@ -80,12 +93,15 @@ static const char * supported_ciphers[] =
     "idea-cfb",
     "rc2-cfb",
     "seed-cfb",
+    "aes-128-gcm",
+    "aes-192-gcm",
+    "aes-256-gcm",
 //    "salsa20",
 //    "chacha20"
 };
 
-#ifdef USE_CRYPTO_POLARSSL
-static const char * supported_ciphers_polarssl[] =
+#ifdef USE_CRYPTO_MBEDTLS
+static const char * supported_ciphers_mbedtls[] =
 {
     "table",
     "ARC4-128",
@@ -102,6 +118,9 @@ static const char * supported_ciphers_polarssl[] =
     CIPHER_UNSUPPORTED,
     CIPHER_UNSUPPORTED,
     CIPHER_UNSUPPORTED,
+    "AES-128-GCM",
+    "AES-192-GCM",
+    "AES-256-GCM",
 //    "salsa20",
 //    "chacha20"
 };
@@ -125,6 +144,9 @@ static const CCAlgorithm supported_ciphers_applecc[] =
     kCCAlgorithmInvalid,
     kCCAlgorithmRC2,
     kCCAlgorithmInvalid,
+    kCCAlgorithmAES,
+    kCCAlgorithmAES,
+    kCCAlgorithmAES,
 //    kCCAlgorithmInvalid,
 //    kCCAlgorithmInvalid
 };
@@ -133,17 +155,23 @@ static const CCAlgorithm supported_ciphers_applecc[] =
 
 static const int supported_ciphers_iv_size[] =
 {
-    0, 0, 16, 16, 16, 16, 8, 16, 16, 16, 8, 8, 8, 8, 16//, 8, 8
+    0, 0, 16, 16, 16, 16, 8, 16, 16, 16, 8, 8, 8, 8, 16, 12, 12, 12
 };
 
 static const int supported_ciphers_key_size[] =
 {
-    0, 16, 16, 16, 24, 32, 16, 16, 24, 32, 16, 8, 16, 16, 16//, 32, 32
+    0, 16, 16, 16, 24, 32, 16, 16, 24, 32, 16, 8, 16, 16, 16, 16, 24, 32
 };
 
 #define CIPHER_NUM (sizeof(supported_ciphers)/sizeof(supported_ciphers[0]))
 
-static int crypto_stream_xor_ic(uint8_t *c, const uint8_t *m, uint64_t mlen,
+/* Check if the method uses GCM mode (AEAD cipher) */
+static int is_gcm_mode(int method)
+{
+    return (method == AES_128_GCM || method == AES_192_GCM || method == AES_256_GCM);
+}
+
+static int __attribute__((unused)) crypto_stream_xor_ic(uint8_t *c, const uint8_t *m, uint64_t mlen,
                                 const uint8_t *n, uint64_t ic, const uint8_t *k,
                                 int method)
 {
@@ -240,13 +268,18 @@ static void merge_sort(uint8_t array[], int length,
 static unsigned char *enc_md5(const unsigned char *d, size_t n, unsigned char *md)
 {
 #if defined(USE_CRYPTO_OPENSSL)
-    return MD5(d, n, md);
-#elif defined(USE_CRYPTO_POLARSSL)
     static unsigned char m[16];
     if (md == NULL) {
         md = m;
     }
-    md5(d, n, md);
+    MD5(d, n, md);
+    return md;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    static unsigned char m[16];
+    if (md == NULL) {
+        md = m;
+    }
+    mbedtls_md5(d, n, md);
     return md;
 #endif
 }
@@ -282,11 +315,11 @@ int cipher_iv_size(const cipher_kt_t *cipher)
 {
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_CIPHER_iv_length(cipher);
-#elif defined(USE_CRYPTO_POLARSSL)
+#elif defined(USE_CRYPTO_MBEDTLS)
     if (cipher == NULL) {
         return 0;
     }
-    return cipher->iv_size;
+    return mbedtls_cipher_info_get_iv_size(cipher);
 #endif
 }
 
@@ -294,16 +327,11 @@ int cipher_key_size(const cipher_kt_t *cipher)
 {
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_CIPHER_key_length(cipher);
-#elif defined(USE_CRYPTO_POLARSSL)
+#elif defined(USE_CRYPTO_MBEDTLS)
     if (cipher == NULL) {
         return 0;
     }
-    /* Override PolarSSL 32 bit default key size with sane 128 bit default */
-    if (cipher->base != NULL && POLARSSL_CIPHER_ID_BLOWFISH ==
-        cipher->base->cipher) {
-        return 128 / 8;
-    }
-    return cipher->key_length / 8;
+    return mbedtls_cipher_info_get_key_size(cipher);
 #endif
 }
 
@@ -314,8 +342,8 @@ int bytes_to_key(const cipher_kt_t *cipher, const digest_type_t *md,
     datal = strlen((const char *)pass);
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_BytesToKey(cipher, md, NULL, pass, datal, 1, key, iv);
-#elif defined(USE_CRYPTO_POLARSSL)
-    md_context_t c;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    mbedtls_md_context_t c;
     unsigned char md_buf[MAX_MD_SIZE];
     int niv;
     int nkey;
@@ -331,36 +359,37 @@ int bytes_to_key(const cipher_kt_t *cipher, const digest_type_t *md,
         return nkey;
     }
 
-    memset(&c, 0, sizeof(md_context_t));
-    if (md_init_ctx(&c, md)) {
+    mbedtls_md_init(&c);
+    if (mbedtls_md_setup(&c, md, 0) != 0) {
+        mbedtls_md_free(&c);
         return 0;
     }
     addmd = 0;
-    mds = md_get_size(md);
+    mds = mbedtls_md_get_size(md);
     for (;; ) {
         int error;
         do {
             error = 1;
-            if (md_starts(&c)) {
+            if (mbedtls_md_starts(&c) != 0) {
                 break;
             }
             if (addmd) {
-                if (md_update(&c, &(md_buf[0]), mds)) {
+                if (mbedtls_md_update(&c, &(md_buf[0]), mds) != 0) {
                     break;
                 }
             } else {
                 addmd = 1;
             }
-            if (md_update(&c, pass, datal)) {
+            if (mbedtls_md_update(&c, pass, datal) != 0) {
                 break;
             }
-            if (md_finish(&c, &(md_buf[0]))) {
+            if (mbedtls_md_finish(&c, &(md_buf[0])) != 0) {
                 break;
             }
             error = 0;
         } while (0);
         if (error) {
-            md_free_ctx(&c);
+            mbedtls_md_free(&c);
             memset(md_buf, 0, MAX_MD_SIZE);
             return 0;
         }
@@ -400,7 +429,7 @@ int bytes_to_key(const cipher_kt_t *cipher, const digest_type_t *md,
             break;
         }
     }
-    md_free_ctx(&c);
+    mbedtls_md_free(&c);
     memset(md_buf, 0, MAX_MD_SIZE);
     return rv;
 #endif
@@ -410,11 +439,11 @@ int rand_bytes(uint8_t *output, int len)
 {
 #if defined(USE_CRYPTO_OPENSSL)
     return RAND_bytes(output, len);
-#elif defined(USE_CRYPTO_POLARSSL)
-    static entropy_context ec = {};
-    static ctr_drbg_context cd_ctx = {};
+#elif defined(USE_CRYPTO_MBEDTLS)
+    static mbedtls_entropy_context ec = {};
+    static mbedtls_ctr_drbg_context cd_ctx = {};
     static unsigned char rand_initialised = 0;
-    const size_t blen = min(len, CTR_DRBG_MAX_REQUEST);
+    const size_t blen = min(len, MBEDTLS_CTR_DRBG_MAX_REQUEST);
 
     if (!rand_initialised) {
 #ifdef _WIN32
@@ -451,18 +480,16 @@ int rand_bytes(uint8_t *output, int len)
             rand_buffer.seed = (uint64_t)clock();
         }
 #endif
-        entropy_init(&ec);
-        if (ctr_drbg_init(&cd_ctx, entropy_func, &ec,
+        mbedtls_entropy_init(&ec);
+        if (mbedtls_ctr_drbg_seed(&cd_ctx, mbedtls_entropy_func, &ec,
                           (const unsigned char *)rand_buffer.buffer, 8) != 0) {
-#if POLARSSL_VERSION_NUMBER >= 0x01030000
-            entropy_free(&ec);
-#endif
+            mbedtls_entropy_free(&ec);
             //FATAL("Failed to initialize random generator");
         }
         rand_initialised = 1;
     }
     while (len > 0) {
-        if (ctr_drbg_random(&cd_ctx, output, blen) != 0) {
+        if (mbedtls_ctr_drbg_random(&cd_ctx, output, blen) != 0) {
             return 0;
         }
         output += blen;
@@ -490,14 +517,14 @@ const cipher_kt_t *get_cipher_type(int method)
 #if defined(USE_CRYPTO_OPENSSL)
     const char *ciphername = supported_ciphers[method];
     return EVP_get_cipherbyname(ciphername);
-#elif defined(USE_CRYPTO_POLARSSL)
-    const char *polarname = supported_ciphers_polarssl[method];
-    if (strcmp(polarname, CIPHER_UNSUPPORTED) == 0) {
-        //LOGE("Cipher %s currently is not supported by PolarSSL library",
+#elif defined(USE_CRYPTO_MBEDTLS)
+    const char *mbedtls_name = supported_ciphers_mbedtls[method];
+    if (strcmp(mbedtls_name, CIPHER_UNSUPPORTED) == 0) {
+        //LOGE("Cipher %s currently is not supported by mbedTLS library",
         //     ciphername);
         return NULL;
     }
-    return cipher_info_from_string(polarname);
+    return mbedtls_cipher_info_from_string(mbedtls_name);
 #endif
 }
 
@@ -510,8 +537,8 @@ const digest_type_t *get_digest_type(const char *digest)
 
 #if defined(USE_CRYPTO_OPENSSL)
     return EVP_get_digestbyname(digest);
-#elif defined(USE_CRYPTO_POLARSSL)
-    return md_info_from_string(digest);
+#elif defined(USE_CRYPTO_MBEDTLS)
+    return mbedtls_md_info_from_string(digest);
 #endif
 }
 
@@ -547,34 +574,57 @@ static int cipher_context_init(const enc_info * info, cipher_ctx_t *ctx, int enc
     }
 #endif
 
-    cipher_evp_t *evp = &ctx->evp;
-    const cipher_kt_t *cipher = get_cipher_type(method);
 #if defined(USE_CRYPTO_OPENSSL)
-    if (cipher == NULL) {
-        // Cipher is not found in OpenSSL library
+    cipher_evp_t evp = EVP_CIPHER_CTX_new_compat();
+    if (evp == NULL) {
+        // Cannot allocate cipher context
         return -1;
     }
-    EVP_CIPHER_CTX_init(evp);
+    ctx->evp = evp;
+
+    const cipher_kt_t *cipher = get_cipher_type(method);
+    if (cipher == NULL) {
+        // Cipher is not found in OpenSSL library
+        EVP_CIPHER_CTX_free_compat(evp);
+        ctx->evp = NULL;
+        return -1;
+    }
+    EVP_CIPHER_CTX_init_compat(evp);
     if (!EVP_CipherInit_ex(evp, cipher, NULL, NULL, NULL, enc)) {
-        // annot initialize cipher
-        return -1; 
+        // Cannot initialize cipher
+        EVP_CIPHER_CTX_free_compat(evp);
+        ctx->evp = NULL;
+        return -1;
     }
     if (!EVP_CIPHER_CTX_set_key_length(evp, info->key_len)) {
-        EVP_CIPHER_CTX_cleanup(evp);
+        EVP_CIPHER_CTX_cleanup_compat(evp);
+        EVP_CIPHER_CTX_free_compat(evp);
+        ctx->evp = NULL;
         // Invalid key length
         return -1;
     }
-    if (method > RC4_MD5) {
+    if (is_gcm_mode(method)) {
+        /* GCM mode - disable padding and set tag length */
+        EVP_CIPHER_CTX_set_padding(evp, 0);
+        /* Tag length will be set after initialization */
+    } else if (method > RC4_MD5) {
         EVP_CIPHER_CTX_set_padding(evp, 1);
     }
-#elif defined(USE_CRYPTO_POLARSSL)
+#elif defined(USE_CRYPTO_MBEDTLS)
+    mbedtls_cipher_context_t *evp = &ctx->evp;
+    const cipher_kt_t *cipher = get_cipher_type(method);
     if (cipher == NULL) {
-        // Cipher is not found in PolarSSL library
+        // Cipher is not found in mbedTLS library
         return -1;
     }
-    if (cipher_init_ctx(evp, cipher) != 0) {
-        // Cannot initialize PolarSSL cipher context
+    mbedtls_cipher_init(evp);
+    if (mbedtls_cipher_setup(evp, cipher) != 0) {
+        // Cannot initialize mbedTLS cipher context
         return -1;
+    }
+    if (is_gcm_mode(method)) {
+        /* GCM mode in mbedTLS - set operation mode */
+        /* The tag length is handled automatically by mbedTLS */
     }
 #endif
     return 0;
@@ -642,36 +692,31 @@ static void cipher_context_set_iv(const enc_info * info, cipher_ctx_t *ctx, uint
     }
 #endif
 
-    cipher_evp_t *evp = &ctx->evp;
+#if defined(USE_CRYPTO_OPENSSL)
+    cipher_evp_t evp = ctx->evp;
     if (evp == NULL) {
         //LOGE("cipher_context_set_iv(): Cipher context is null");
         return;
     }
-#if defined(USE_CRYPTO_OPENSSL)
     if (!EVP_CipherInit_ex(evp, NULL, NULL, true_key, iv, enc)) {
-        EVP_CIPHER_CTX_cleanup(evp);
+        EVP_CIPHER_CTX_cleanup_compat(evp);
         //FATAL("Cannot set key and IV");
     }
-#elif defined(USE_CRYPTO_POLARSSL)
-    if (cipher_setkey(evp, true_key, info->key_len * 8, enc) != 0) {
-        cipher_free_ctx(evp);
-        //FATAL("Cannot set PolarSSL cipher key");
+#elif defined(USE_CRYPTO_MBEDTLS)
+    mbedtls_cipher_context_t *evp = &ctx->evp;
+    if (mbedtls_cipher_setkey(evp, true_key, info->key_len * 8,
+                             enc ? MBEDTLS_ENCRYPT : MBEDTLS_DECRYPT) != 0) {
+        mbedtls_cipher_free(evp);
+        //FATAL("Cannot set mbedTLS cipher key");
     }
-#if POLARSSL_VERSION_NUMBER >= 0x01030000
-    if (cipher_set_iv(evp, iv, iv_len) != 0) {
-        cipher_free_ctx(evp);
-        //FATAL("Cannot set PolarSSL cipher IV");
+    if (mbedtls_cipher_set_iv(evp, iv, iv_len) != 0) {
+        mbedtls_cipher_free(evp);
+        //FATAL("Cannot set mbedTLS cipher IV");
     }
-    if (cipher_reset(evp) != 0) {
-        cipher_free_ctx(evp);
-        //FATAL("Cannot finalize PolarSSL cipher context");
+    if (mbedtls_cipher_reset(evp) != 0) {
+        mbedtls_cipher_free(evp);
+        //FATAL("Cannot reset mbedTLS cipher context");
     }
-#else
-    if (cipher_reset(evp, iv) != 0) {
-        cipher_free_ctx(evp);
-        //FATAL("Cannot set PolarSSL cipher IV");
-    }
-#endif
 #endif
 
 #ifdef DEBUG
@@ -696,11 +741,16 @@ static void cipher_context_release(enc_info * info, cipher_ctx_t *ctx)
     }
 #endif
 
-    cipher_evp_t *evp = &ctx->evp;
 #if defined(USE_CRYPTO_OPENSSL)
-    EVP_CIPHER_CTX_cleanup(evp);
-#elif defined(USE_CRYPTO_POLARSSL)
-    cipher_free_ctx(evp);
+    cipher_evp_t evp = ctx->evp;
+    if (evp != NULL) {
+        EVP_CIPHER_CTX_cleanup_compat(evp);
+        EVP_CIPHER_CTX_free_compat(evp);
+        ctx->evp = NULL;
+    }
+#elif defined(USE_CRYPTO_MBEDTLS)
+    mbedtls_cipher_context_t *evp = &ctx->evp;
+    mbedtls_cipher_free(evp);
 #endif
 }
 
@@ -716,13 +766,16 @@ static int cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, int *olen,
         return (ret == kCCSuccess) ? 1 : 0;
     }
 #endif
-    cipher_evp_t *evp = &ctx->evp;
 #if defined(USE_CRYPTO_OPENSSL)
+    EVP_CIPHER_CTX *evp = ctx->evp;
     return EVP_CipherUpdate(evp, (uint8_t *)output, olen,
                             (const uint8_t *)input, (size_t)ilen);
-#elif defined(USE_CRYPTO_POLARSSL)
-    return !cipher_update(evp, (const uint8_t *)input, (size_t)ilen,
-                          (uint8_t *)output, (size_t *)olen);
+#elif defined(USE_CRYPTO_MBEDTLS)
+    size_t outlen = *olen;
+    int ret = mbedtls_cipher_update(&ctx->evp, (const uint8_t *)input, (size_t)ilen,
+                          (uint8_t *)output, &outlen);
+    *olen = (int)outlen;
+    return (ret == 0) ? 1 : 0;
 #endif
 }
 
@@ -732,18 +785,34 @@ size_t ss_calc_buffer_size(struct enc_ctx * ctx, size_t ilen)
     int method = ctx->info->method;
     const cipher_kt_t *cipher = get_cipher_type(method);
 #if defined(USE_CRYPTO_OPENSSL)
-    if (ctx->init)
-        return ilen + EVP_CIPHER_block_size(cipher); 
-    else
-        return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher); 
-#elif defined(USE_CRYPTO_POLARSSL)
+    if (is_gcm_mode(method)) {
+        /* GCM mode needs extra 16 bytes for the authentication tag */
+        if (ctx->init)
+            return ilen + 16;
+        else
+            return EVP_CIPHER_iv_length(cipher) + ilen + 16;
+    } else {
+        if (ctx->init)
+            return ilen + EVP_CIPHER_block_size(cipher);
+        else
+            return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher);
+    }
+#elif defined(USE_CRYPTO_MBEDTLS)
     if (cipher == NULL) {
         return ilen;
     }
-    if (ctx->init)
-        return ilen + cipher_get_block_size(&ctx->evp.evp);
-    else
-        return cipher->iv_size + ilen + cipher_get_block_size(&ctx->evp.evp);
+    if (is_gcm_mode(method)) {
+        /* GCM mode needs extra 16 bytes for the authentication tag */
+        if (ctx->init)
+            return ilen + 16;
+        else
+            return mbedtls_cipher_info_get_iv_size(cipher) + ilen + 16;
+    } else {
+        if (ctx->init)
+            return ilen + mbedtls_cipher_get_block_size(&ctx->evp);
+        else
+            return mbedtls_cipher_info_get_iv_size(cipher) + ilen + mbedtls_cipher_get_block_size(&ctx->evp);
+    }
 #endif
 }
 
@@ -754,6 +823,7 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
         int err = 1;
         int iv_len = 0;
         int p_len = plen, c_len = plen;
+        int tag_len = 0;
         if (!ctx->init) {
             iv_len = ctx->info->iv_len;
         }
@@ -764,6 +834,12 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
             memcpy(ciphertext, iv, iv_len);
             ctx->counter = 0;
             ctx->init = 1;
+        }
+
+        /* For GCM mode, we need to handle the authentication tag */
+        if (is_gcm_mode(ctx->info->method)) {
+            tag_len = 16; /* GCM standard tag length */
+            c_len = p_len + tag_len; /* Output includes tag */
         }
 
         if (ctx->info->method >= SALSA20) {
@@ -801,6 +877,27 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
             if (!err) {
                 return 0;
             }
+
+            /* For GCM mode, get and append the authentication tag */
+            if (is_gcm_mode(ctx->info->method)) {
+#if defined(USE_CRYPTO_OPENSSL)
+                /* Get the tag from GCM mode */
+                if (!EVP_CIPHER_CTX_ctrl(*(EVP_CIPHER_CTX **)&ctx->evp, EVP_CTRL_GCM_GET_TAG, 16,
+                                       ciphertext + iv_len + p_len)) {
+                    // Failed to get tag
+                    return 0;
+                }
+                c_len = p_len + 16; /* Total output = ciphertext + tag */
+#elif defined(USE_CRYPTO_MBEDTLS)
+                /* Get the tag from GCM mode */
+                if (mbedtls_cipher_write_tag(&ctx->evp,
+                        (unsigned char *)(ciphertext + iv_len + p_len), 16) != 0) {
+                    // Failed to get tag
+                    return 0;
+                }
+                c_len = p_len + 16; /* Total output = ciphertext + tag */
+#endif
+            }
         }
 
 #ifdef DEBUG
@@ -830,13 +927,23 @@ int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
         int p_len = clen;
         int iv_len = 0;
         int err = 1;
+        int tag_len = 0;
 
         if (!ctx->init) {
             iv_len = ctx->info->iv_len;
-            p_len -= iv_len;
+            /* For GCM mode, we need to account for the tag in ciphertext */
+            if (is_gcm_mode(ctx->info->method)) {
+                tag_len = 16; /* GCM standard tag length */
+            }
+            p_len -= iv_len + tag_len;
             cipher_context_set_iv(ctx->info, &ctx->evp, (uint8_t *)ciphertext, iv_len, 0);
             ctx->counter = 0;
             ctx->init = 1;
+        } else {
+            /* Already initialized - need to account for tag if GCM mode */
+            if (is_gcm_mode(ctx->info->method)) {
+                tag_len = 16;
+            }
         }
 
         if (ctx->info->method >= SALSA20) {
@@ -865,11 +972,39 @@ int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
             if (padding) {
                 memmove(plaintext, plaintext + padding, p_len);
             }
-*/            
+*/
         } else {
             err = cipher_context_update(&ctx->evp, (uint8_t *)plaintext, &p_len,
                                         (const uint8_t *)(ciphertext + iv_len),
-                                        clen - iv_len);
+                                        clen - iv_len - tag_len);
+            if (!err) {
+                return 0;
+            }
+
+            /* For GCM mode, verify the authentication tag */
+            if (is_gcm_mode(ctx->info->method)) {
+#if defined(USE_CRYPTO_OPENSSL)
+                /* Set the expected tag from ciphertext */
+                if (!EVP_CIPHER_CTX_ctrl(*(EVP_CIPHER_CTX **)&ctx->evp, EVP_CTRL_GCM_SET_TAG, 16,
+                                       ciphertext + clen - tag_len)) {
+                    // Failed to set tag for verification
+                    return 0;
+                }
+                /* Note: In GCM mode, EVP_CipherFinal will verify the tag */
+                int final_len = 0;
+                if (!EVP_CipherFinal_ex(*(EVP_CIPHER_CTX **)&ctx->evp, (unsigned char *)(plaintext + p_len), &final_len)) {
+                    // Tag verification failed
+                    return 0;
+                }
+#elif defined(USE_CRYPTO_MBEDTLS)
+                /* Set the expected tag from ciphertext for verification */
+                if (mbedtls_cipher_check_tag(&ctx->evp,
+                        (const unsigned char *)(ciphertext + clen - tag_len), 16) != 0) {
+                    // Tag verification failed
+                    return 0;
+                }
+#endif
+            }
         }
 
         if (!err) {
@@ -910,14 +1045,15 @@ static int enc_key_init(enc_info * info, int method, const char *pass)
         return -1;
 
 #if defined(USE_CRYPTO_OPENSSL)
+    /* OpenSSL 3.0+ - algorithms are loaded automatically */
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     OpenSSL_add_all_algorithms();
+#endif
 #endif
 
     uint8_t iv[MAX_IV_LENGTH];
 
-    cipher_kt_t *cipher = NULL;
-    cipher_kt_t cipher_info;
-
+    const cipher_kt_t *cipher = NULL;
 
     if (method == SALSA20 || method == CHACHA20) {
 /*    
@@ -942,12 +1078,14 @@ static int enc_key_init(enc_info * info, int method, const char *pass)
 
     if (cipher == NULL) {
         do {
-#if defined(USE_CRYPTO_POLARSSL) && defined(USE_CRYPTO_APPLECC)
+#if !defined(USE_CRYPTO_MBEDTLS) && defined(USE_CRYPTO_APPLECC)
+            /* Only apply AppleCC fallback for OpenSSL, not mbedTLS */
             if (supported_ciphers_applecc[method] != kCCAlgorithmInvalid) {
+                mbedtls_cipher_info_t cipher_info;
                 cipher_info.base = NULL;
                 cipher_info.key_length = supported_ciphers_key_size[method] * 8;
                 cipher_info.iv_size = supported_ciphers_iv_size[method];
-                cipher = (cipher_kt_t *)&cipher_info;
+                cipher = (const cipher_kt_t *)&cipher_info;
                 break;
             }
 #endif

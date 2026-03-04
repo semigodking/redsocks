@@ -45,23 +45,31 @@
 #if defined(USE_CRYPTO_OPENSSL)
 
 #include <openssl/evp.h>
-typedef EVP_CIPHER cipher_kt_t;
-typedef EVP_CIPHER_CTX cipher_evp_t;
-typedef EVP_MD digest_type_t;
+#include <openssl/md5.h>
+#include <openssl/rand.h>
+#include <openssl/opensslv.h>
+
+typedef const EVP_CIPHER cipher_kt_t;
+typedef EVP_CIPHER_CTX *cipher_evp_t;
+typedef const EVP_MD digest_type_t;
 #define MAX_KEY_LENGTH EVP_MAX_KEY_LENGTH
 #define MAX_IV_LENGTH EVP_MAX_IV_LENGTH
 #define MAX_MD_SIZE EVP_MAX_MD_SIZE
 
-#elif defined(USE_CRYPTO_POLARSSL)
+#elif defined(USE_CRYPTO_MBEDTLS)
 
-#include <polarssl/cipher.h>
-#include <polarssl/md.h>
-typedef cipher_info_t cipher_kt_t;
-typedef cipher_context_t cipher_evp_t;
-typedef md_info_t digest_type_t;
+#include <mbedtls/cipher.h>
+#include <mbedtls/md5.h>
+#include <mbedtls/md.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+
+typedef mbedtls_cipher_info_t cipher_kt_t;
+typedef mbedtls_cipher_context_t cipher_evp_t;
+typedef mbedtls_md_info_t digest_type_t;
 #define MAX_KEY_LENGTH 64
-#define MAX_IV_LENGTH POLARSSL_MAX_IV_LENGTH
-#define MAX_MD_SIZE POLARSSL_MD_MAX_SIZE
+#define MAX_IV_LENGTH MBEDTLS_MAX_IV_LENGTH
+#define MAX_MD_SIZE MBEDTLS_MD_MAX_SIZE
 
 #endif
 
@@ -89,7 +97,11 @@ typedef struct {
 #endif
 
 typedef struct {
-    cipher_evp_t evp;
+#if defined(USE_CRYPTO_OPENSSL)
+    EVP_CIPHER_CTX *evp;
+#elif defined(USE_CRYPTO_MBEDTLS)
+    mbedtls_cipher_context_t evp;
+#endif
 #ifdef USE_CRYPTO_APPLECC
     cipher_cc_t cc;
 #endif
@@ -120,8 +132,11 @@ typedef struct {
 #define IDEA_CFB            12
 #define RC2_CFB             13
 #define SEED_CFB            14
-#define SALSA20             15
-#define CHACHA20            16
+#define AES_128_GCM         15
+#define AES_192_GCM         16
+#define AES_256_GCM         17
+#define SALSA20             18
+#define CHACHA20            19
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
