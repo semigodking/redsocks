@@ -15,8 +15,8 @@ jobs:
       with:
         # envs: 'MYTOKEN MYTOKEN2'
         usesh: true
-        prepare: pkg install -y curl libevent gmake 
+        prepare: pkg install -y curl libevent gmake openssl mbedtls
         run: |
           pwd
           freebsd-version
-          gmake DISABLE_SHADOWSOCKS=1
+          gmake

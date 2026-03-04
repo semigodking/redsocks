@@ -13,15 +13,11 @@ jobs:
     - name: install depends
       run: |
         sudo apt update
-        sudo apt install -y gnupg2
-        echo "deb http://security.ubuntu.com/ubuntu bionic-security main" | sudo tee -a /etc/apt/sources.list
-        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
-        sudo apt update
-        sudo apt install -y libssl1.0-dev libevent-dev zlib1g-dev
+        sudo apt install -y libevent-dev libmbedtls-dev zlib1g-dev
     - name: Build
       run: |
         mkdir release
-        make ENABLE_STATIC=1
+        make USE_CRYPTO_MBEDTLS=1 ENABLE_STATIC=1
         mv redsocks2 release/redsocks2-`arch`-${{github.ref_name}}
     - name: Release
       uses: softprops/action-gh-release@v1
