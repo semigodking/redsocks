@@ -49,6 +49,7 @@ int red_recv_udp_pkt(
     char control[1024];
 
     memset(&msg, 0, sizeof(msg));
+    memset(inaddr, 0, sizeof(*inaddr));
     msg.msg_name = inaddr;
     msg.msg_namelen = sizeof(*inaddr);
     msg.msg_iov = &io;

@@ -202,6 +202,7 @@ static void socks5_pkt_from_socks(int fd, short what, void *_arg)
 
     // Support IPv6
     struct sockaddr_storage src_addr;
+    memset(&src_addr, 0, sizeof(src_addr));
     size_t header_size = 4;
     if (pkt->header.addrtype == socks5_addrtype_ipv4) {
         struct sockaddr_in * src = (struct sockaddr_in *)&src_addr;

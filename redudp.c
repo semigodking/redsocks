@@ -293,6 +293,7 @@ void redudp_drop_client(redudp_client *client)
         list_del(&q->list);
         free(q);
     }
+    HASH_DELETE(hh, client->instance->clients_ht, client);
     list_del(&client->list);
     free(client);
 }
@@ -325,8 +326,6 @@ void redudp_fwd_pkt_to_sender(redudp_client *client, void *buf, size_t len,
         redudp_log_error(client, LOG_WARNING, "bound_udp_get failure");
         return;
     }
-    // TODO: record remote address in client
-
 
     sent = sendto(fd, buf, len, 0,
 #if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -425,6 +424,7 @@ static void redudp_first_pkt_from_client(
     redudp_bump_timeout(client);
 
     list_add(&client->list, &self->clients);
+    HASH_ADD(hh, self->clients_ht, clientaddr, sizeof(client->clientaddr), client);
 
     redudp_log_error(client, LOG_DEBUG, "got 1st packet from client");
 
@@ -444,7 +444,7 @@ static void redudp_pkt_from_client(int fd, short what, void *_arg)
     redudp_instance *self = _arg;
     struct sockaddr_storage clientaddr, destaddr, *pdestaddr;
     ssize_t pktlen;
-    redudp_client *tmp, *client = NULL;
+    redudp_client *client = NULL;
 
     pdestaddr = do_tproxy(self) ? &destaddr : NULL;
 
@@ -457,16 +457,7 @@ static void redudp_pkt_from_client(int fd, short what, void *_arg)
         // In case tproxy is not used, use configured destination address instead.
         pdestaddr = &self->config.destaddr;
 
-    // TODO: this lookup may be SLOOOOOW.
-    list_for_each_entry(tmp, &self->clients, list) {
-        if (0 == evutil_sockaddr_cmp((struct sockaddr *)&clientaddr,
-                                     (struct sockaddr *)&tmp->clientaddr,
-                                     1)) {
-
-            client = tmp;
-            break;
-        }
-    }
+    HASH_FIND(hh, self->clients_ht, &clientaddr, sizeof(clientaddr), client);
 
     if (client) {
         redsocks_time(&client->last_client_event);
@@ -761,7 +752,7 @@ static void redudp_fini_instance(redudp_instance *instance)
         memset(&instance->listener, 0, sizeof(instance->listener));
     }
 
-    if (instance->relay_ss->instance_fini)
+    if (instance->relay_ss && instance->relay_ss->instance_fini)
         instance->relay_ss->instance_fini(instance);
 
     list_del(&instance->list);

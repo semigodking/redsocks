@@ -3,6 +3,7 @@
 
 #include <event2/event.h>
 #include "list.h"
+#include "uthash.h"
 
 #define MAX_UDP_PACKET_SIZE 0xFFFF
 
@@ -46,12 +47,14 @@ typedef struct redudp_instance_t {
 	redudp_config   config;
 	struct event *  listener;
 	list_head       clients;
+	struct redudp_client_t *clients_ht; // hash table for fast client lookup
 	udprelay_subsys*relay_ss;
 	void *          shared_buff; // pointer to 64K buffer shared by clients for receiving/processing udp packets
 } redudp_instance;
 
 typedef struct redudp_client_t {
 	list_head           list;
+	UT_hash_handle      hh;         // hash table handle
 	redudp_instance *   instance;
 	struct sockaddr_storage  clientaddr;
 	struct sockaddr_storage  destaddr;

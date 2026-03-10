@@ -33,10 +33,7 @@ typedef struct ss_client_t {
 } ss_client;
 
 typedef struct ss_instance_t {
-    int method; 
     enc_info info;
-    struct enc_ctx e_ctx;
-    struct enc_ctx d_ctx;
     void * buff;
 } ss_instance;
 
@@ -82,10 +79,10 @@ static void ss_forward_pkt(redudp_client *client, struct sockaddr* destaddr, voi
     ssize_t outgoing;
     int rc;
     ss_header header;
-    size_t len = 0;
     size_t header_len = 0;
     size_t fwdlen = 0;
-    void * buff = client->instance->shared_buff;
+    void * buff = ss->buff;
+    void * plaintext_buf = (char *)buff + MAX_UDP_PACKET_SIZE;
 
     /* build and send header */
     if (client->destaddr.ss_family == AF_INET) {
@@ -107,25 +104,35 @@ static void ss_forward_pkt(redudp_client *client, struct sockaddr* destaddr, voi
         return ;
     }
 
-    if (enc_ctx_init(&ss->info, &ss->e_ctx, 1)) {
-        redudp_log_error(client, LOG_ERR, "Shadowsocks UDP failed to initialize encryption context.");
+    if (header_len + pktlen > MAX_UDP_PACKET_SIZE) {
+        redudp_log_error(client, LOG_DEBUG, "Packet too large, dropping it");
         return;
     }
-    rc = ss_encrypt(&ss->e_ctx, (char *)&header, header_len, buff, &len);
-    if (rc)
-    {
-        if (len + pktlen < MAX_UDP_PACKET_SIZE)
-            rc = ss_encrypt(&ss->e_ctx, (char *)data, pktlen, buff+len, &fwdlen);
-        else
-            rc = 0;
+
+    if (is_aead_cipher(ss->info.method)) {
+        char *plaintext = plaintext_buf;
+        memcpy(plaintext, &header, header_len);
+        memcpy(plaintext + header_len, data, pktlen);
+        rc = ss_udp_encrypt(&ss->info, plaintext, header_len + pktlen, buff, &fwdlen);
+    } else {
+        struct enc_ctx e_ctx;
+        // Stream cipher: two-pass encrypt is fine, header and data share the same ctx
+        size_t len = 0;
+        if (enc_ctx_init(&ss->info, &e_ctx, 1)) {
+            redudp_log_error(client, LOG_ERR, "Shadowsocks UDP failed to initialize encryption context.");
+            return;
+        }
+        rc = ss_encrypt(&e_ctx, (char *)&header, header_len, buff, &len);
+        if (rc) {
+            rc = ss_encrypt(&e_ctx, (char *)data, pktlen, buff + len, &fwdlen);
+            fwdlen += len;
+        }
+        enc_ctx_free(&e_ctx);
     }
-    enc_ctx_free(&ss->e_ctx);
-    if (!rc)
-    {
+    if (!rc) {
         redudp_log_error(client, LOG_DEBUG, "Can't encrypt packet, dropping it");
         return;
     }
-    fwdlen += len;
 
     memset(&msg, 0, sizeof(msg));
     msg.msg_name = relayaddr;
@@ -166,12 +173,17 @@ static void ss_pkt_from_server(int fd, short what, void *_arg)
     if (pktlen == -1)
         return;
 
-    if (enc_ctx_init(&ss->info, &ss->d_ctx, 0)) {
-        redudp_log_error(client, LOG_ERR, "Shadowsocks UDP failed to initialize decryption context.");
-        return;
+    if (is_aead_cipher(ss->info.method)) {
+        rc = ss_udp_decrypt(&ss->info, buff, pktlen, buff2, &fwdlen);
+    } else {
+        struct enc_ctx d_ctx;
+        if (enc_ctx_init(&ss->info, &d_ctx, 0)) {
+            redudp_log_error(client, LOG_ERR, "Shadowsocks UDP failed to initialize decryption context.");
+            return;
+        }
+        rc = ss_decrypt(&d_ctx, buff, pktlen, buff2, &fwdlen);
+        enc_ctx_free(&d_ctx);
     }
-    rc = ss_decrypt(&ss->d_ctx, buff, pktlen, buff2, &fwdlen);
-    enc_ctx_free(&ss->d_ctx);
     if (!rc) {
         redudp_log_error(client, LOG_DEBUG, "Can't decrypt packet, dropping it");
         return;
@@ -279,7 +291,7 @@ static int ss_instance_init(struct redudp_instance_t *instance)
 
     int valid_cred =  ss_is_valid_cred(config->login, config->password);
     if (!valid_cred 
-    || (ss->method = enc_init(&ss->info, config->password, config->login), ss->method == -1))
+    || (enc_init(&ss->info, config->password, config->login) == -1))
     {
         log_error(LOG_ERR, "Invalided encrytion method or password.");
         return -1;
@@ -292,7 +304,7 @@ static int ss_instance_init(struct redudp_instance_t *instance)
             config->login);
     }
     // An additional buffer is allocated for each instance for encryption/decrption.
-    ss->buff = malloc(MAX_UDP_PACKET_SIZE);
+    ss->buff = malloc(MAX_UDP_PACKET_SIZE * 2);
     if (!ss->buff) {
         log_error(LOG_ERR, "Out of memory.");
         return -1;

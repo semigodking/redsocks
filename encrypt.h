@@ -143,5 +143,9 @@ int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
 int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
                  char *plaintext, size_t *olen);
 size_t ss_calc_buffer_size(struct enc_ctx *ctx, size_t ilen);
+/* UDP-specific AEAD: [salt][enc(payload)+TAG], no length chunking */
+int ss_udp_encrypt(enc_info *info, char *plaintext, size_t plen, char *ciphertext, size_t *clen);
+int ss_udp_decrypt(enc_info *info, char *ciphertext, size_t clen, char *plaintext, size_t *olen);
+#define is_aead_cipher(m) ((m) == AES_128_GCM || (m) == AES_192_GCM || (m) == AES_256_GCM || (m) == CHACHA20_IETF_POLY1305)
 
 #endif // _ENCRYPT_H

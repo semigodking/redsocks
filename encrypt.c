@@ -1144,3 +1144,63 @@ void enc_free(enc_info * info)
     }
 
 }
+
+/* UDP AEAD format: [salt(key_len)][enc(payload)+TAG(16)]
+ * No length chunking - each UDP packet is a single AEAD operation.
+ */
+int ss_udp_encrypt(enc_info *info, char *plaintext, size_t plen, char *ciphertext, size_t *clen)
+{
+    if (!is_aead_mode(info->method))
+        return ss_encrypt(NULL, plaintext, plen, ciphertext, clen); /* fallback: shouldn't happen */
+
+    int key_len = info->key_len;
+    int is_chacha = (info->method == CHACHA20_IETF_POLY1305);
+    uint8_t *out = (uint8_t *)ciphertext;
+    uint8_t subkey[MAX_KEY_LENGTH];
+    uint8_t nonce[AEAD_NONCE_LEN];
+
+    /* Generate salt and derive subkey */
+    rand_bytes(out, key_len);
+    if (hkdf_sha1(info->key, key_len, out, key_len, subkey, key_len) != 0)
+        return 0;
+    out += key_len;
+
+    /* Encrypt payload in one shot */
+    make_nonce(nonce, 0);
+    if (!aead_encrypt(subkey, key_len, is_chacha, nonce, (uint8_t *)plaintext, plen, out))
+        return 0;
+
+    *clen = key_len + plen + AEAD_TAG_LEN;
+    return 1;
+}
+
+int ss_udp_decrypt(enc_info *info, char *ciphertext, size_t clen, char *plaintext, size_t *olen)
+{
+    if (!is_aead_mode(info->method))
+        return ss_decrypt(NULL, ciphertext, clen, plaintext, olen); /* fallback: shouldn't happen */
+
+    int key_len = info->key_len;
+    int is_chacha = (info->method == CHACHA20_IETF_POLY1305);
+    const uint8_t *in = (const uint8_t *)ciphertext;
+    uint8_t subkey[MAX_KEY_LENGTH];
+    uint8_t nonce[AEAD_NONCE_LEN];
+
+    if (clen < (size_t)(key_len + AEAD_TAG_LEN))
+        return 0;
+
+    /* Read salt and derive subkey */
+    if (hkdf_sha1(info->key, key_len, in, key_len, subkey, key_len) != 0)
+        return 0;
+    in += key_len;
+
+    size_t payload_len = clen - key_len - AEAD_TAG_LEN;
+
+    /* Decrypt payload in one shot */
+    make_nonce(nonce, 0);
+    if (!aead_decrypt(subkey, key_len, is_chacha, nonce,
+                      in, payload_len, in + payload_len, (uint8_t *)plaintext))
+        return 0;
+
+    *olen = payload_len;
+    return 1;
+}
